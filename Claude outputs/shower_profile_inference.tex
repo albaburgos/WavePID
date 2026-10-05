@@ -1,0 +1,108 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+
+\newcommand{\D}{\mathcal{D}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\title{Hadronic Shower Profile from DOM Pulses:\\ Problem and Two Solutions}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Inference problem}
+
+\paragraph{Unknowns.}
+A hadronic cascade with vertex $\bm{v}$, time $t_v$, direction $\hat{\bm{u}}$, energy $E$,
+and longitudinal profile along the axis $s$:
+\begin{equation}
+  P(s) \approx A\, g(s;a,b), \qquad
+  g(s;a,b) = \frac{s^{a-1}e^{-s/b}}{\Gamma(a)\,b^{a}} .
+\end{equation}
+$P(s)$ is either the number of particles crossing depth $s$, $N(s)$, or the charged-track
+length per unit depth, $\ell(s)$. Cherenkov light is proportional to $\ell(s)$, so $\ell(s)$
+is the profile the pulses measure. The target is
+\begin{equation}
+  \bm{y} = (a,\, b), \qquad \text{or equivalently mean } m = ab,\ \text{width } \sigma = \sqrt{a}\,b .
+\end{equation}
+
+\paragraph{Data.}
+Photoelectron counts $n_{dk}$ at DOM $d = 1,\dots,N$ in time bin $k = 1,\dots,K$.
+
+\paragraph{Model.}
+Each count is Poisson with expected value $\mu_{dk}(\bm{\theta})$, where
+$\bm{\theta} = (\bm{v}, t_v, \hat{\bm{u}}, E, a, b)$. DOMs and bins are independent given $\bm{\theta}$:
+\begin{equation}
+  \ln \mathcal{L}(\bm{\theta}) = \sum_{d=1}^{N}\sum_{k=1}^{K}
+  \Big[\, n_{dk}\ln\mu_{dk}(\bm{\theta}) - \mu_{dk}(\bm{\theta}) \,\Big].
+\end{equation}
+
+\paragraph{Goal.}
+\begin{equation}
+  p(a,b \mid \D) \;\propto\; \mathcal{L}(\bm{\theta})\, p(\bm{\theta})
+  \quad \text{(marginalized over geometry and } E\text{)}.
+\end{equation}
+
+\paragraph{Labels from simulation.}
+For each Geant4 hadronic shower $e$, fit $g$ to its true profile:
+\begin{equation}
+  (a_e, b_e) = \argmin_{a,b}\; \text{fit}\big(P_e(s),\, g(s;a,b)\big).
+\end{equation}
+
+\section{Solution A: learn the answer directly (Neptune)}
+
+A point transformer $f_\phi$ maps the hits straight to the profile parameters and their uncertainty:
+\begin{equation}
+  \big(\hat{\bm{y}},\ \hat{\bm{s}}^{2}\big) = f_\phi(\D), \qquad \bm{y} = (\ln a,\, \ln b).
+\end{equation}
+Training on $M$ simulated hadronic showers minimizes the Gaussian negative log-likelihood:
+\begin{equation}
+  \mathcal{J}(\phi) = \frac{1}{M}\sum_{e=1}^{M}\sum_{i=1}^{2}
+  \left[ \frac{(y_{e,i} - \hat y_{e,i})^2}{2\,\hat s_{e,i}^{2}} + \ln \hat s_{e,i} \right].
+\end{equation}
+Inference is a single forward pass. The labels must come from full hadronic-shower
+simulation, so that $(a,b)$ varies from shower to shower at fixed $E$.
+
+\section{Solution B: fit a likelihood (CANDELA, retrained)}
+
+The current CANDELA kernel is trained on EM point cascades with PPC's mean profile.
+It must be retrained on hadronic cascades, with the profile as an extra input:
+\begin{equation}
+  \text{kernel:}\quad (\bm{x}_d,\ E,\ a,\ b) \;\longmapsto\;
+  \Big( \Lambda(\bm{x}_d; a,b),\ \ \pi(t \mid \bm{x}_d; a,b) \Big),
+\end{equation}
+where $\bm{x}_d$ is the geometry of DOM $d$ relative to the shower, $\Lambda$ is the expected
+light per GeV, and $\pi$ is the arrival-time distribution. The training showers must sample
+$(a,b)$ over its natural range, not only its mean at each energy.
+
+The expected counts are then
+\begin{equation}
+  \mu_{dk}(\bm{\theta}) = E\; \Lambda(\bm{x}_d; a,b) \int_{\text{bin } k} \pi(t - t_v \mid \bm{x}_d; a,b)\, dt
+  \;+\; \nu_{dk},
+\end{equation}
+with $\nu_{dk}$ the noise. The fit is
+\begin{equation}
+  (\hat a, \hat b, \hat E, \hat{\bm{v}}, \hat{\hat{\bm{u}}}) = \argmin_{\bm{\theta}}\; \big[-\ln\mathcal{L}(\bm{\theta})\big],
+\end{equation}
+and the uncertainty comes from the curvature of $-\ln\mathcal{L}$ at the minimum:
+\begin{equation}
+  \mathrm{Cov}(\hat a, \hat b) \approx \Big[\nabla^2_{(a,b)}\big(-\ln\mathcal{L}\big)\Big]^{-1}.
+\end{equation}
+
+\section{Comparison}
+\begin{center}
+\begin{tabular}{lll}
+\hline
+ & A: Neptune & B: CANDELA (retrained) \\
+\hline
+Learns & $\D \mapsto (a,b)$ & light from a shower with profile $(a,b)$ \\
+Training data & hadronic showers with $(a,b)$ labels & hadronic showers with varied $(a,b)$ \\
+Inference & one forward pass & minimize $-\ln\mathcal{L}$ per event \\
+Uncertainty & predicted $\hat{\bm{s}}$ (check coverage) & curvature of $-\ln\mathcal{L}$ \\
+\hline
+\end{tabular}
+\end{center}
+
+\end{document}

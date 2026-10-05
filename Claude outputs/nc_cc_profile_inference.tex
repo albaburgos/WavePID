@@ -1,0 +1,293 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,bm}
+\usepackage{booktabs}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{remark}{Remark}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{assumption}{Assumption}
+
+\newcommand{\D}{\mathcal{D}}
+\newcommand{\y}{\bm{y}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathcal{N}}
+\newcommand{\KL}{\mathrm{KL}}
+\newcommand{\CC}{\mathrm{CC}}
+\newcommand{\NC}{\mathrm{NC}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator{\softplus}{softplus}
+
+\title{NC/CC Separation of Cascades by Inferring the Longitudinal Profile $(a,b)$\\
+from DOM Pulse Time Profiles at Known Energy and Vertex}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+%======================================================================
+\section{Physics and goal}
+
+A cascade-like neutrino event belongs to one of two classes, $c\in\{\CC,\NC\}$:
+\begin{itemize}
+  \item $\nu_e$ CC: an electromagnetic (EM) shower from the electron, carrying the fraction
+        $1-y$ of the neutrino energy, plus a hadronic shower carrying $y$ (inelasticity $y$);
+  \item NC (all flavours): a hadronic shower only; the outgoing neutrino is invisible.
+\end{itemize}
+Hadronic showers develop more slowly and fluctuate more than EM showers of the same energy.
+The mean profiles used by PPC (CWLR parameterization, $E$ in GeV, $X_0 = 0.392$\,m) are
+\begin{equation}
+  g(s;a,b) = \frac{s^{a-1}e^{-s/b}}{\Gamma(a)\,b^{a}},\qquad
+  \begin{aligned}
+    a_{\text{EM}} &= 2.018 + 0.632\ln E, & b_{\text{EM}} &= X_0/0.632 = 0.619\ \text{m},\\
+    a_{\text{h}} &= 1.584 + 0.419\ln E, & b_{\text{h}} &= X_0/0.338 = 1.157\ \text{m}.
+  \end{aligned}
+\end{equation}
+
+\begin{center}
+\begin{tabular}{rcccc}
+\toprule
+$E$ [GeV] & $m_{\text{EM}} = ab$ [m] & $\sigma_{\text{EM}} = \sqrt{a}\,b$ [m] & $m_{\text{h}}$ [m] & $\sigma_{\text{h}}$ [m]\\
+\midrule
+$10^3$ & 3.95 & 1.56 & 5.18 & 2.45 \\
+$10^4$ & 4.85 & 1.73 & 6.30 & 2.70 \\
+$10^5$ & 5.76 & 1.89 & 7.41 & 2.93 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At fixed energy, NC showers are about 30\% longer and 50\% wider on average. $\nu_e$ CC showers
+lie between the two curves, closer to EM, because typically $y\lesssim0.3$. Event-to-event
+fluctuations of $(a,b)$ overlap the two classes. That overlap, together with how precisely
+$(a,b)$ can be recovered from the light, limits the separation.
+
+\paragraph{Strategy.}
+Solve the inverse problem $\D\mapsto p(a,b\mid\D,\bm\kappa)$ (Section~3), then classify from the
+inferred profile (Section~4).
+
+%======================================================================
+\section{Inference problem}
+
+\begin{definition}[Known quantities, unknowns, data]
+\leavevmode
+\begin{itemize}
+  \item Known: $\bm\kappa = (E,\ \bm v,\ t_v)$, i.e.\ the visible energy, vertex and vertex time.
+  \item Unknown target: $\y = (\ln a,\ \ln b)\in\R^2$.
+  \item Nuisance: the shower axis $\hat{\bm u}\in S^2$. It is dropped if the direction is also
+        known.
+  \item Data: $\D = \{(\bm r_d,\ \bm n_d)\}_{d=1}^{N}$, where $\bm n_d = (n_{d1},\dots,n_{dK})$
+        is the photoelectron time profile of DOM $d$ in $K$ bins.
+\end{itemize}
+\end{definition}
+
+\begin{remark}[Which energy is known]
+$E$ must be the \emph{EM-equivalent visible} energy, i.e.\ what a reconstruction returns. If $E$
+were the true deposited energy, the lower light yield of hadronic showers (about 20--30\% less
+light) would separate NC from CC through the total charge alone, independently of the profile
+shape.
+\end{remark}
+
+\paragraph{Forward model.}
+With $\bm r(s) = \bm v + s\hat{\bm u}$ and $t_e(s) = t_v + s/c$, the expected count in bin $k$
+of DOM $d$ is
+\begin{equation}
+  \mu_{dk}(\y,\hat{\bm u};\bm\kappa) = E\int_0^\infty\! ds\; g(s;a,b)\int_{\tau_k}^{\tau_{k+1}}\!dt\;
+  G_d\big(\bm r(s),\hat{\bm u};\ t - t_e(s)\big) \;+\; \nu_{dk},
+  \label{eq:fwd}
+\end{equation}
+where $G_d$ is the photon Green's function (PE per GeV per unit delay) and $\nu_{dk}$ the noise.
+
+\begin{assumption}[Conditional independence]
+Given $(\y,\hat{\bm u},\bm\kappa)$, the counts $n_{dk}$ are independent Poisson variables.
+Hence
+\begin{equation}
+  \ell(\y,\hat{\bm u}) := \ln p(\D\mid\y,\hat{\bm u},\bm\kappa)
+  = \sum_{d=1}^{N}\sum_{k=1}^{K}\big[n_{dk}\ln\mu_{dk} - \mu_{dk} - \ln n_{dk}!\big].
+  \label{eq:loglik}
+\end{equation}
+\end{assumption}
+
+\paragraph{Target of inference.}
+The posterior of the profile given the pulses, with the direction marginalized:
+\begin{equation}
+  p(\y\mid\D,\bm\kappa) = \frac{\int e^{\ell(\y,\hat{\bm u})}\,p(\y,\hat{\bm u}\mid\bm\kappa)\,d\hat{\bm u}}
+  {\iint e^{\ell(\y',\hat{\bm u})}\,p(\y',\hat{\bm u}\mid\bm\kappa)\,d\hat{\bm u}\,d\y'} .
+  \label{eq:post}
+\end{equation}
+The prior $p(\y\mid\bm\kappa) = \sum_c \pi_c\,p(\y\mid c,\bm\kappa)$ is the class mixture of the
+simulated sample, with class fractions $\pi_c$.
+
+\paragraph{Labels.}
+For each simulated event $e$ (CC or NC), $\y_e$ is the Gamma fit to the charged-track-length
+profile of \emph{all} secondaries, the EM and hadronic parts together:
+\begin{equation}
+  (a_e,b_e) = \argmax_{a,b}\ \sum_i w_i\Big[(a-1)\ln s_i - \frac{s_i}{b} - \ln\Gamma(a) - a\ln b\Big],
+  \qquad s_i = (\bm r_i - \bm v)\cdot\hat{\bm u}_e .
+\end{equation}
+
+%======================================================================
+\section{Stage 1: inferring $(a,b)$}
+
+\subsection{Solution A: Neptune, conditional NLL minimization}
+
+\paragraph{Inputs relative to the known vertex.}
+Because $\bm\kappa$ is known, express every hit relative to it:
+\begin{equation}
+  \bm\xi_j = \big(\bm r_j-\bm v,\ t_j - t_v\big),\qquad
+  t^{\text{res}}_j = t_j - t_v - \frac{n_g}{c}\|\bm r_j - \bm v\|,
+\end{equation}
+where $t^{\text{res}}_j$ is added to the per-DOM features $\bm f_j$. With vertex-relative inputs
+the model does not have to learn translation invariance. With the 4-D rotary encoding, the
+attention scores depend only on differences $\bm\xi_l - \bm\xi_k$ in any case.
+
+\paragraph{Model.}
+Let $\bm h_\phi(\D) = \mathrm{Pool}\circ\mathrm{Enc}\circ\mathrm{Tok}(\{(\bm\xi_j,\bm f_j)\})$ be
+the Neptune embedding. The energy is appended before the head,
+$\bm c_\phi = \bm h_\phi(\D)\oplus[\ln E,\ \ln(1+Q_{\text{tot}})]$, and the head outputs a
+bivariate Gaussian:
+\begin{equation}
+  q_\phi(\y\mid\D,\bm\kappa) = \N\big(\y;\ \bm\mu_\phi(\bm c_\phi),\ L_\phi L_\phi^{\top}\big),
+  \qquad (L_\phi)_{ii} = \softplus(\cdot)+\varepsilon .
+\end{equation}
+
+\paragraph{Objective.}
+Minimize the expected KL divergence from the true posterior \eqref{eq:post}. Up to a constant,
+this is the expected conditional NLL, estimated on $M$ simulated events drawn from both classes
+in proportions $\pi_c$:
+\begin{equation}
+  \hat\phi = \argmin_\phi\ \frac{1}{M}\sum_{e=1}^{M}\Big[\tfrac12\big\|L_{\phi,e}^{-1}(\y_e-\bm\mu_{\phi,e})\big\|^2
+  + \ln (L_{\phi,e})_{11} + \ln (L_{\phi,e})_{22}\Big] + \frac{\lambda}{2}\|\phi\|^2 .
+  \label{eq:nll}
+\end{equation}
+
+\begin{proposition}
+For every $(\D,\bm\kappa)$, the population minimizer of \eqref{eq:nll} (with $\lambda\to0$ and
+unlimited capacity) is
+$\bm\mu^\ast = \E[\y\mid\D,\bm\kappa]$ and $\Sigma^\ast = \mathrm{Cov}[\y\mid\D,\bm\kappa]$,
+whether or not the posterior is Gaussian.
+\end{proposition}
+\begin{proof}
+$\E_{\y\mid\D}[-\ln\N(\y;\bm\mu,\Sigma)] = \tfrac12\operatorname{tr}(\Sigma^{-1}C)
++\tfrac12(\bm m-\bm\mu)^\top\Sigma^{-1}(\bm m-\bm\mu)+\tfrac12\ln\det\Sigma+\text{const}$,
+with $\bm m$ and $C$ the posterior mean and covariance. The second term is minimized at
+$\bm\mu=\bm m$. The rest is strictly convex in $P=\Sigma^{-1}$, with its stationary point at
+$P = C^{-1}$.
+\end{proof}
+
+\paragraph{Output.}
+One forward pass gives $\hat\y = \bm\mu_{\hat\phi}(\D,\bm\kappa)$ and
+$\hat\Sigma = \Sigma_{\hat\phi}(\D,\bm\kappa)$. A conditional normalizing flow can replace the
+Gaussian head when the posterior is visibly non-Gaussian.
+
+\subsection{Solution B: direct likelihood maximization}
+
+With a photon kernel retrained on hadronic and EM showers of varying $(a,b)$, so that it
+approximates the $a,b$-dependent Green's function in \eqref{eq:fwd}, and with $\bm\kappa$ fixed,
+only 2 parameters (4 if the direction is free) remain:
+\begin{equation}
+  (\hat\y,\hat{\bm u}) = \argmax_{\y,\hat{\bm u}}\ \ell(\y,\hat{\bm u}),
+  \qquad
+  \hat\Sigma = \big[-\nabla^2_{\y}\,\ell_p(\y)\big]^{-1}_{\hat\y},
+  \qquad
+  \ell_p(\y) = \max_{\hat{\bm u}}\ell(\y,\hat{\bm u}),
+\end{equation}
+where $\ell_p$ is the profile log-likelihood, with the direction maximized out.
+
+%======================================================================
+\section{Stage 2: NC/CC decision from the inferred profile}
+
+\paragraph{Optimal test.}
+By the Neyman--Pearson lemma, at fixed $\bm\kappa$ the most powerful test of CC against NC
+thresholds the likelihood ratio of the full data,
+$\Lambda^\ast(\D) = \ln p(\D\mid\CC,\bm\kappa) - \ln p(\D\mid\NC,\bm\kappa)$.
+The profile-based approach replaces $\D$ by the profile. It is exact under the following
+assumption.
+
+\begin{assumption}[Profile sufficiency]
+$p(\D\mid\y,\hat{\bm u},c,\bm\kappa) = p(\D\mid\y,\hat{\bm u},\bm\kappa)$: once the profile is
+fixed, the pulses carry no further information about the class.
+\end{assumption}
+
+\begin{proposition}[Class posterior from the profile posterior]
+Under profile sufficiency,
+\begin{equation}
+  P(c\mid\D,\bm\kappa) = \pi_c\int q(\y\mid\D,\bm\kappa)\,
+  \frac{p(\y\mid c,\bm\kappa)}{\sum_{c'}\pi_{c'}\,p(\y\mid c',\bm\kappa)}\,d\y ,
+  \label{eq:classpost}
+\end{equation}
+where $q = p(\y\mid\D,\bm\kappa)$ is the stage-1 posterior, computed with the same mixture prior.
+\end{proposition}
+\begin{proof}
+$P(c\mid\D) = \int P(c\mid\y,\D)\,p(\y\mid\D)\,d\y$. By sufficiency $P(c\mid\y,\D) = P(c\mid\y)$,
+and by Bayes' rule $P(c\mid\y) = \pi_c\,p(\y\mid c)/p(\y)$.
+\end{proof}
+
+\paragraph{Computation.}
+The class-conditional densities $p(\y\mid c,\bm\kappa)$ are estimated from the labelled
+simulation in energy bins, for example as Gaussians $\N(\bm m_c(E), S_c(E))$. Equation
+\eqref{eq:classpost} is then evaluated by Monte Carlo with $\y^{(r)}\sim q$:
+\begin{equation}
+  \hat P(c\mid\D,\bm\kappa) = \frac{\pi_c}{R}\sum_{r=1}^{R}
+  \frac{p(\y^{(r)}\mid c,\bm\kappa)}{\sum_{c'}\pi_{c'}\,p(\y^{(r)}\mid c',\bm\kappa)} .
+\end{equation}
+
+\paragraph{Gaussian closed form.}
+When the stage-1 prior is broad compared with the likelihood, $q$ is approximately the
+normalized likelihood, and $\hat\y$ behaves as a measurement $\hat\y\mid\y\sim\N(\y,\hat\Sigma)$.
+Convolving with the class densities gives
+\begin{equation}
+  \Lambda(\D) = \ln\N\big(\hat\y;\ \bm m_{\CC},\ S_{\CC}+\hat\Sigma\big)
+              - \ln\N\big(\hat\y;\ \bm m_{\NC},\ S_{\NC}+\hat\Sigma\big),
+  \qquad
+  \text{decide CC if } \Lambda(\D) > \eta .
+\end{equation}
+This statistic automatically down-weights events whose profile is poorly measured (large
+$\hat\Sigma$). The threshold $\eta$ sets the working point on the ROC curve.
+
+\paragraph{Marginal-likelihood version (Solution B).}
+Without passing through $q$,
+\begin{equation}
+  \ln p(\D\mid c,\bm\kappa) = \ln\int e^{\ell_p(\y)}\,p(\y\mid c,\bm\kappa)\,d\y
+  \approx \ell_p(\hat\y_c) + \ln p(\hat\y_c\mid c,\bm\kappa) + \ln 2\pi
+  - \tfrac12\ln\det H_c ,
+\end{equation}
+where $\hat\y_c$ is the maximizer of the integrand and $H_c$ the Hessian of its negative log at
+$\hat\y_c$ (Laplace approximation). The test statistic is
+$\Lambda = \ln p(\D\mid\CC,\bm\kappa) - \ln p(\D\mid\NC,\bm\kappa)$.
+
+%======================================================================
+\section{Limits and evaluation}
+
+\paragraph{Information loss.}
+Because $\hat\y$ is a function of $\D$, the data-processing inequality gives
+\begin{equation}
+  I(c;\ \hat\y\mid\bm\kappa)\ \le\ I(c;\ \D\mid\bm\kappa).
+\end{equation}
+Compressing the pulses to an estimated profile can only lose class information. Under profile
+sufficiency, $c\to\y\to\D$ is a Markov chain, so in addition
+$I(c;\D\mid\bm\kappa)\le I(c;\y\mid\bm\kappa)$: the true profile bounds what the pulses can
+reveal. Without sufficiency, $\D$ can carry class information that $(a,b)$ does not. The profile
+route is therefore interpretable but not guaranteed optimal. Hadronic showers differ from EM ones in more than
+$(a,b)$: larger light-yield fluctuations, delayed light from neutron captures, and muons from
+meson decays.
+
+\paragraph{Benchmark.}
+Train the same Neptune encoder as a direct classifier, $P_\phi(\CC\mid\D,\bm\kappa)$, with
+binary cross-entropy (the existing \texttt{neutrino\_classification} task). Its ROC curve
+estimates the achievable upper bound. The gap between it and the profile-based ROC measures how
+much class information lies outside $(a,b)$.
+
+\paragraph{Metrics, in bins of $E$.}
+\begin{itemize}
+  \item Separation: AUC, and the NC rejection at fixed CC efficiency.
+  \item Stage-1 calibration: the squared Mahalanobis distance
+        $(\y_e-\hat\y_e)^\top\hat\Sigma_e^{-1}(\y_e-\hat\y_e)$ should follow $\chi^2_2$.
+  \item Intrinsic overlap: the separation using the \emph{true} $\y_e$, i.e.\ with
+        $\hat\Sigma=0$ and the true labels. This is the best any profile-based method can do.
+\end{itemize}
+
+\end{document}

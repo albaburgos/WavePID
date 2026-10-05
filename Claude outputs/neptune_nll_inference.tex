@@ -1,0 +1,297 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,bm}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{remark}{Remark}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+
+\newcommand{\D}{\mathcal{D}}
+\newcommand{\y}{\bm{y}}
+\newcommand{\Y}{\bm{Y}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\KL}{\mathrm{KL}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator{\tr}{tr}
+\DeclareMathOperator{\softmax}{softmax}
+\DeclareMathOperator{\softplus}{softplus}
+
+\title{Solution A: Amortized Inference of the Hadronic Shower Profile\\
+with Neptune by Conditional Negative Log-Likelihood Minimization}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+%======================================================================
+\section{Inference problem}
+
+\begin{definition}[Shower and target]
+A simulated hadronic cascade is a random outcome $\omega$ (the full Geant4 history) with
+vertex $\bm{v}\in\R^3$, direction $\hat{\bm{u}}\in S^2$ and energy $E>0$. Its charged-track-length
+profile along the axis is
+\begin{equation}
+  \ell_\omega(s) = \sum_{\text{segments } i} w_i\,\delta(s - s_i),
+  \qquad s_i = (\bm{r}_i-\bm{v})\cdot\hat{\bm{u}},
+\end{equation}
+with $w_i$ the segment lengths and $\bm{r}_i$ the segment midpoints. The target is the pair of
+log Gamma parameters $\y = T(\omega) = (\ln a_\omega,\ \ln b_\omega)\in\R^2$, where
+$(a_\omega,b_\omega)$ maximize the length-weighted Gamma likelihood
+\begin{equation}
+  (a_\omega,b_\omega) = \argmax_{a,b>0}\ \sum_i w_i\Big[(a-1)\ln s_i - \frac{s_i}{b} - \ln\Gamma(a) - a\ln b\Big].
+  \label{eq:label}
+\end{equation}
+\end{definition}
+
+\begin{definition}[Observation]
+The detector response is a finite set of hits
+\begin{equation}
+  \D = \{(\bm{\xi}_j,\ \bm{f}_j)\}_{j=1}^{n},\qquad
+  \bm{\xi}_j = (x_j,y_j,z_j,t_j)\in\R^4,\quad \bm{f}_j\in\R^{F},
+\end{equation}
+one element per hit DOM, with $\bm{f}_j$ the $F$ per-DOM summary features of its pulse series
+(charge, first-hit time, time quantiles, \dots). $n$ varies from event to event.
+\end{definition}
+
+\paragraph{Data-generating process.}
+Simulation draws $\omega\sim p_{\text{gen}}(\omega)$, then $\D\sim p(\D\mid\omega)$
+(photon propagation and detector response). This induces the joint law of $(\y,\D)$:
+\begin{equation}
+  p_{\text{gen}}(\y,\D) = \int p(\D\mid\omega)\;\delta\big(\y - T(\omega)\big)\;p_{\text{gen}}(\omega)\,d\omega .
+\end{equation}
+
+\paragraph{Goal.}
+For an observed event $\D^\ast$, report the posterior
+\begin{equation}
+  p(\y\mid\D^\ast) = \frac{p(\y,\D^\ast)}{\int p(\y',\D^\ast)\,d\y'} .
+\end{equation}
+This density is intractable: it marginalizes over every shower history $\omega$ compatible
+with $\y$ and over the geometry. Solution A approximates it directly with a parametric
+conditional density $q_\phi(\y\mid\D)$ that is \emph{amortized}: one set of parameters $\phi$
+serves every event.
+
+%======================================================================
+\section{Objective: conditional negative log-likelihood}
+
+\paragraph{Population objective.}
+Choose $\phi$ to minimize the expected Kullback--Leibler divergence from the true posterior
+to the model:
+\begin{equation}
+  \mathcal{R}(\phi) = \E_{p(\D)}\Big[\KL\big(p(\y\mid\D)\,\big\|\,q_\phi(\y\mid\D)\big)\Big].
+\end{equation}
+Expanding the KL divergence,
+\begin{equation}
+  \mathcal{R}(\phi)
+  = \underbrace{-\,\E_{p(\y,\D)}\big[\ln q_\phi(\y\mid\D)\big]}_{\text{expected conditional NLL}}
+  \;-\;\underbrace{H(\Y\mid\D)}_{\text{independent of }\phi},
+  \label{eq:kl}
+\end{equation}
+so minimizing $\mathcal{R}$ is equivalent to minimizing the expected conditional negative
+log-likelihood. Only samples $(\y,\D)$ are required, never the density $p(\y\mid\D)$ itself.
+Here $\Y$ denotes the random target, and $H(\Y\mid\D) = -\E_{p(\y,\D)}[\ln p(\y\mid\D)]$.
+
+\paragraph{Target prior and importance weights.}
+The simulated spectrum $p_{\text{gen}}$ is generally not the prior one wants the posterior to
+reflect. For a target prior $\pi(\omega)$ with the same support, define the weights
+\begin{equation}
+  w(\omega) = \frac{\pi(\omega)}{p_{\text{gen}}(\omega)},
+  \qquad\text{e.g.}\quad w \propto E^{\gamma_{\text{gen}}-\gamma_{\text{target}}}
+  \ \text{ for power-law spectra.}
+\end{equation}
+Then $\E_\pi[f] = \E_{p_{\text{gen}}}[w f]$ for any integrable $f$. The learned posterior is
+$p_\pi(\y\mid\D)$, so the reweighting is part of the model and not only a variance-reduction
+device.
+
+\paragraph{Empirical objective.}
+With $M$ independent simulated events $(\y_e,\D_e,w_e)$,
+\begin{equation}
+  \boxed{\;
+  \hat{\mathcal{J}}_M(\phi) = -\frac{\sum_{e=1}^{M} w_e\,\ln q_\phi(\y_e\mid\D_e)}{\sum_{e=1}^{M} w_e}
+  + \frac{\lambda}{2}\|\phi\|_2^2 \;}
+  \label{eq:emp}
+\end{equation}
+The events are independent draws, so the log-likelihood of the training set is a (weighted)
+sum over events. This is the conditional independence assumption applied at the level of whole
+events. The $L_2$ term corresponds to a Gaussian prior on $\phi$, making $\hat\phi$ a MAP
+estimate. AdamW's decoupled weight decay matches this only approximately.
+
+\paragraph{Stochastic optimization.}
+For a minibatch $\mathcal{B}\subset\{1,\dots,M\}$ drawn uniformly,
+\begin{equation}
+  \bm{g}_{\mathcal{B}} = -\frac{1}{\sum_{e\in\mathcal{B}} w_e}\sum_{e\in\mathcal{B}} w_e\,\nabla_\phi\ln q_\phi(\y_e\mid\D_e) + \lambda\phi
+\end{equation}
+is a consistent (self-normalized) estimator of $\nabla_\phi\hat{\mathcal{J}}_M$.
+
+%======================================================================
+\section{Model: Neptune as a conditional density}
+
+The model factorizes as an encoder $\bm{c}_\phi:\D\mapsto\R^{d}$ followed by a density head,
+$q_\phi(\y\mid\D) = q_\phi\big(\y\mid\bm{c}_\phi(\D)\big)$.
+
+\paragraph{1. Point embedding.} $\bm{z}_j = \mathrm{MLP}_1(\bm{f}_j)\in\R^{d_0}$.
+
+\paragraph{2. Tokenization (farthest-point sampling).}
+With the space--time metric $\|\bm{\xi}\|_\kappa^2 = x^2+y^2+z^2+(\kappa t)^2$, where $\kappa$
+has units of velocity (default $0.3$\,km/$\mu$s), choose $T=\min(n,T_{\max})$ centroids greedily,
+\begin{equation}
+  c_1 \text{ fixed},\qquad
+  c_{k+1} = \argmax_{j}\ \min_{l\le k}\ \|\bm{\xi}_j-\bm{\xi}_{c_l}\|_\kappa ,
+\end{equation}
+and assign each hit to its nearest centroid (a Voronoi cell),
+$\alpha(j) = \argmin_k \|\bm{\xi}_j-\bm{\xi}_{c_k}\|_\kappa$. Token $k$ is
+\begin{equation}
+  \bm{x}_k^{(0)} = \mathrm{MLP}_2\Big(\mathrm{pool}_{\{j:\alpha(j)=k\}}\bm{z}_j\ \oplus\ \big[\,n_k,\ Q_k,\ \mathrm{sd}(t)_k,\ r^{\mathrm{rms}}_k\,\big]\Big),
+\end{equation}
+where $n_k$, $Q_k$, $\mathrm{sd}(t)_k$ and $r^{\mathrm{rms}}_k$ are the hit multiplicity, total
+charge, time spread and RMS radius of cell $k$, and the anchor of token $k$ is
+$\bm{\xi}_k := \bm{\xi}_{c_k}$. If $n\le T_{\max}$, every hit is its own token.
+
+\paragraph{3. Transformer encoder with 4-D rotary position encoding.}
+Each of $N_L$ layers applies, with RMS normalization $\mathrm{N}(\cdot)$,
+\begin{equation}
+  X \leftarrow X + \mathrm{Attn}\big(\mathrm{N}(X)\big),\qquad
+  X \leftarrow X + \mathrm{SwiGLU}\big(\mathrm{N}(X)\big).
+\end{equation}
+For one head with queries $\bm{q}_k$, keys $\bm{k}_l$ and values $\bm{v}_l$, the rotary
+encoding applies a block-diagonal rotation $R(\bm{\xi})$ built from all four coordinates, with
+$R(\bm{\xi})^{\top}R(\bm{\xi}') = R(\bm{\xi}'-\bm{\xi})$:
+\begin{equation}
+  A_{kl} = \frac{\big\langle R(\bm{\xi}_k)\bm{q}_k,\ R(\bm{\xi}_l)\bm{k}_l\big\rangle}{\sqrt{d_h}}
+         = \frac{\bm{q}_k^{\top}R(\bm{\xi}_l-\bm{\xi}_k)\,\bm{k}_l}{\sqrt{d_h}},
+  \qquad
+  \mathrm{Attn}(X)_k = \sum_{l\in\mathcal{V}}\softmax_l(A_{kl})\,\bm{v}_l ,
+\end{equation}
+where $\mathcal{V}$ is the set of valid (unpadded) tokens. The attention scores therefore
+depend on token positions only through the relative space--time offsets
+$\bm{\xi}_l-\bm{\xi}_k$. An additive Fourier encoding of absolute position is also used, so
+the model can still learn detector-specific effects such as depth-dependent ice.
+
+\paragraph{4. Pooling and head.}
+With attention weights $\beta_k = \softmax_{k\in\mathcal{V}}\big(\bm{a}^{\top}\bm{x}_k^{(N_L)}\big)$,
+\begin{equation}
+  \bm{c}_\phi(\D) = \Big(\sum_{k\in\mathcal{V}}\beta_k\,\bm{x}_k^{(N_L)}\Big)\ \oplus\ \big[\ln(1+T),\ \ln(1+Q_{\text{tot}})\big].
+\end{equation}
+The two scalars restore the event size and total light yield, which pooling normalizes away.
+
+\begin{remark}[Symmetry]
+Steps 1--4 act on the hit \emph{set} and do not depend on the order of the hits, except
+through the choice of the first centroid $c_1$ in farthest-point sampling. $q_\phi$ is
+therefore permutation-invariant up to that tie-break.
+\end{remark}
+
+%======================================================================
+\section{Density head}
+
+\subsection{Gaussian head}
+The head outputs $\bm{\mu}_\phi(\bm{c})\in\R^{2}$ and the entries of a lower-triangular matrix
+$L_\phi(\bm{c})$ with $(L_\phi)_{ii} = \softplus(\cdot)+\varepsilon>0$. Set
+$\Sigma_\phi = L_\phi L_\phi^{\top}\succ 0$ and
+\begin{equation}
+  q_\phi(\y\mid\D) = \mathcal{N}\big(\y;\ \bm{\mu}_\phi,\ \Sigma_\phi\big).
+\end{equation}
+The per-event loss is
+\begin{equation}
+  -\ln q_\phi(\y\mid\D)
+  = \tfrac12\,\big\|L_\phi^{-1}(\y-\bm{\mu}_\phi)\big\|_2^2 + \sum_{i=1}^{2}\ln (L_\phi)_{ii} + \ln(2\pi),
+  \label{eq:gnll}
+\end{equation}
+using $\tfrac12\ln\det\Sigma = \sum_i\ln L_{ii}$. The residual term costs one triangular solve.
+With $L_\phi$ diagonal, \eqref{eq:gnll} reduces to the existing \texttt{gaussian\_nll\_loss},
+applied to each component.
+
+\begin{proposition}[What the Gaussian head learns]
+Fix $\D$ and let $\bm{m}=\E[\y\mid\D]$ and $C=\mathrm{Cov}[\y\mid\D]\succ0$. Over all
+$\bm{\mu}\in\R^2$ and $\Sigma\succ0$,
+\begin{equation}
+  \argmin_{\bm{\mu},\Sigma}\ \E_{\y\mid\D}\big[-\ln\mathcal{N}(\y;\bm{\mu},\Sigma)\big] = (\bm{m},\ C),
+\end{equation}
+whether or not $p(\y\mid\D)$ is Gaussian.
+\end{proposition}
+\begin{proof}
+Using $\E\big[(\y-\bm{\mu})(\y-\bm{\mu})^{\top}\big] = C + (\bm{m}-\bm{\mu})(\bm{m}-\bm{\mu})^{\top}$,
+\begin{equation}
+  \E\big[-\ln\mathcal{N}\big] = \tfrac12\tr\!\big(\Sigma^{-1}C\big)
+  + \tfrac12(\bm{m}-\bm{\mu})^{\top}\Sigma^{-1}(\bm{m}-\bm{\mu})
+  + \tfrac12\ln\det\Sigma + \text{const}.
+\end{equation}
+The second term is non-negative and vanishes only at $\bm{\mu}=\bm{m}$. With $P=\Sigma^{-1}$,
+the remainder $\tfrac12\tr(PC)-\tfrac12\ln\det P$ is strictly convex in $P$, and its gradient
+$\tfrac12(C-P^{-1})$ vanishes only at $P=C^{-1}$, i.e.\ $\Sigma=C$.
+\end{proof}
+
+Consequently, with enough capacity and data, the optimum of \eqref{eq:emp} ($\lambda\to0$)
+satisfies $\bm{\mu}_{\hat\phi}(\D)\approx\E_\pi[\y\mid\D]$ and
+$\Sigma_{\hat\phi}(\D)\approx\mathrm{Cov}_\pi[\y\mid\D]$. The head matches the posterior's first
+two moments. If the posterior is skewed or curved (the $a$--$b$ degeneracy), Gaussian credible
+regions are miscalibrated even at the optimum.
+
+\subsection{Flow head (exact conditional density)}
+Let $f_\phi(\cdot\,;\bm{c}):\R^2\to\R^2$ be a diffeomorphism for every $\bm{c}$, and
+$\bm{z}=f_\phi^{-1}(\y;\bm{c})$. Then
+\begin{equation}
+  -\ln q_\phi(\y\mid\D) = \tfrac12\|\bm{z}\|_2^2 + \ln(2\pi)
+  - \ln\left|\det \frac{\partial f_\phi^{-1}(\y;\bm{c})}{\partial\y}\right|.
+\end{equation}
+If the flow family is rich enough to contain $p_\pi(\y\mid\D)$, the minimizer of \eqref{eq:kl}
+is exact: $\mathcal{R}(\hat\phi)=0 \iff q_{\hat\phi}(\cdot\mid\D)=p_\pi(\cdot\mid\D)$ for
+$p(\D)$-almost every $\D$.
+
+%======================================================================
+\section{Inference on a new event}
+
+For an observed $\D^\ast$ the estimate costs one forward pass:
+\begin{equation}
+  \hat{\y} = \bm{\mu}_{\hat\phi}(\D^\ast),\qquad \hat\Sigma = \Sigma_{\hat\phi}(\D^\ast).
+\end{equation}
+
+\paragraph{Derived quantities.}
+Because $(\ln m,\ \ln\sigma) = B\y$ with
+$B = \begin{pmatrix}1&1\\ \tfrac12&1\end{pmatrix}$, the Gaussian family is closed under this
+map:
+\begin{equation}
+  (\ln m,\ln\sigma)\mid\D^\ast \;\approx\; \mathcal{N}\big(B\hat{\y},\ B\hat\Sigma B^{\top}\big),
+  \qquad
+  \mathrm{Var}(\ln m) = \hat\Sigma_{11}+\hat\Sigma_{22}+2\hat\Sigma_{12}.
+\end{equation}
+On the original scale $a=e^{y_1}$ is log-normal:
+\begin{equation}
+  \E[a\mid\D^\ast] = \exp\!\big(\hat y_1 + \tfrac12\hat\Sigma_{11}\big),
+  \qquad
+  \mathrm{median}(a\mid\D^\ast) = e^{\hat y_1}.
+\end{equation}
+
+%======================================================================
+\section{Validation}
+
+\paragraph{Calibration.}
+If $q_{\hat\phi}$ is the true Gaussian posterior, the squared Mahalanobis distance of held-out
+truth satisfies
+\begin{equation}
+  r_e^2 = (\y_e-\hat{\bm{\mu}}_e)^{\top}\hat\Sigma_e^{-1}(\y_e-\hat{\bm{\mu}}_e)\ \sim\ \chi^2_2 ,
+  \qquad
+  \Pr\big(r_e^2\le\chi^2_{2,\alpha}\big)=\alpha\quad\forall\,\alpha\in(0,1).
+\end{equation}
+Compare the empirical CDF of $\{r_e^2\}$ with $\chi^2_2$. An excess at large $r^2$ means the
+posteriors are too narrow. For the flow head, check coverage of highest-density regions, or
+use simulation-based calibration ranks.
+
+\paragraph{Resolution floor.}
+By the law of total variance,
+\begin{equation}
+  \mathrm{Var}(\y) = \underbrace{\E\big[\mathrm{Var}(\y\mid\D)\big]}_{\text{irreducible given }\D}
+  + \mathrm{Var}\big(\E[\y\mid\D]\big).
+\end{equation}
+No estimator of $\y$ from $\D$ has mean squared error below $\E[\tr\,\mathrm{Var}(\y\mid\D)]$.
+The shower-to-shower fluctuations that leave no trace in the light set this floor.
+
+\paragraph{Label noise.}
+The labels \eqref{eq:label} are finite-sample fits, $\y_e = \y_e^{\text{true}} + \bm{\epsilon}_e$.
+The network therefore learns $p(\y^{\text{label}}\mid\D)$, whose covariance includes
+$\mathrm{Cov}(\bm{\epsilon})$. This matters only if the fit error is comparable to the
+posterior width.
+
+\end{document}
