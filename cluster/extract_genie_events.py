@@ -14,7 +14,8 @@ state. Directions are rotated into the frame where the neutrino travels along +x
 (OMSim shoots along +x from (-1.7 d, 0, d)). Nuclei heavier than alpha, neutrinos
 and particles below --emin are dropped. Output:
   <out-dir>/nue_cc_events.txt, nue_nc_events.txt   (event index restarts at 0 per class)
-  <out-dir>/nue_cc_truth.csv, nue_nc_truth.csv     (per event: E_nu, y, n particles, weights ...)
+  <out-dir>/nue_cc_truth.csv, nue_nc_truth.csv     (per event: E_nu, y, n particles, OneWeight, NEvents, nu PDG,
+                                                    true direction, TypeWeight, GENIE mode: everything a flux re-weighting needs)
 """
 import argparse, csv, glob, math, os, sys
 import numpy as np
@@ -90,6 +91,8 @@ def main():
     ap.add_argument("--enu-min", type=float, default=0.0, help="keep events with E_nu >= this [GeV]")
     ap.add_argument("--enu-max", type=float, default=1e9, help="keep events with E_nu <= this [GeV]")
     ap.add_argument("--max-per-class", type=int, default=0, help="stop a class after this many events (0 = all)")
+    ap.add_argument("--flavour", type=int, default=0,
+                    help="keep only this |PDG| (12 nu_e, 14 nu_mu, 16 nu_tau; 0 = all). The output tag follows: nue_, numu_, nutau_")
     ap.add_argument("--chunk-size", type=int, default=0,
                     help="also write <tag>_chunkNNN.txt files of this many events (indices restart per chunk) "
                          "for the Slurm array; the truth csv gets chunk/global_index columns")
@@ -103,13 +106,18 @@ def main():
     print(f"{len(files)} files")
 
     HEADER = "# <event index> <G4 name> <kinetic E GeV> <dx> <dy> <dz>   (neutrino along +x)\n"
-    writers, truth, counts, chunks, tags = {}, {}, {1: 0, 2: 0}, {}, {1: "nue_cc", 2: "nue_nc"}
+    tag_root = {0: "nue", 12: "nue", 14: "numu", 16: "nutau"}[abs(args.flavour)]
+    writers, truth, counts, chunks, tags = {}, {}, {1: 0, 2: 0}, {}, {1: f"{tag_root}_cc", 2: f"{tag_root}_nc"}
     for it, tag in tags.items():
         writers[it] = open(os.path.join(args.out_dir, f"{tag}_events.txt"), "w")
         writers[it].write(HEADER)
         truth[it] = csv.writer(open(os.path.join(args.out_dir, f"{tag}_truth.csv"), "w"))
         truth[it].writerow(["global_index", "chunk", "index", "file", "run", "event", "interaction", "e_nu_gev", "y",
-                            "n_particles", "e_visible_gev", "one_weight", "n_events_gen", "particles"])
+                            "n_particles", "e_visible_gev", "one_weight", "n_events_gen", "particles",
+                            # for re-weighting to any flux (atmospheric vs astrophysical is only a weight): the neutrino's
+                            # PDG code (sign = nu/nubar), its true direction (OMSim randomises it), NuGen's TypeWeight, and
+                            # GENIE's scattering mode (qel/res/dis/coh/mec/...) when the I3GENIEResultDict is in the frame
+                            "nu_pdg", "zenith_rad", "azimuth_rad", "type_weight", "genie_mode"])
         chunks[it] = None
 
     def chunk_writer(it, gidx):
@@ -145,6 +153,8 @@ def main():
             nu, parts, y = fs
             if not (args.enu_min <= nu.energy <= args.enu_max):
                 continue
+            if args.flavour and abs(int(nu.pdg_encoding)) != abs(args.flavour):
+                continue
             R = rotation_to_x([nu.dir.x, nu.dir.y, nu.dir.z])
             gidx = counts[it]
             idx = gidx % args.chunk_size if args.chunk_size else gidx
@@ -168,11 +178,17 @@ def main():
             if cw is not None:
                 cw.writelines(lines)
             hdr = fr["I3EventHeader"] if "I3EventHeader" in fr else None
+            mode = ""
+            if "I3GENIEResultDict" in fr:
+                g = fr["I3GENIEResultDict"]
+                mode = next((k for k in ("qel", "res", "dis", "coh", "mec", "dfr", "imd", "nuel", "em") if k in g and g[k]), "")
+            type_weight = wd.get("TypeWeight", float("nan"))
             truth[it].writerow([gidx, gidx // args.chunk_size if args.chunk_size else 0, idx,
                                 os.path.basename(path), hdr.run_id if hdr else -1, hdr.event_id if hdr else -1,
                                 it, f"{nu.energy:.6g}", f"{y:.5f}", len(names), f"{e_vis:.6g}",
                                 f"{wd.get('OneWeight', float('nan')):.6g}", f"{wd.get('NEvents', float('nan')):.6g}",
-                                " ".join(names)])
+                                " ".join(names),
+                                int(nu.pdg_encoding), f"{nu.dir.zenith:.6f}", f"{nu.dir.azimuth:.6f}", f"{type_weight:.6g}", mode])
             counts[it] += 1
         f.close()
         if args.max_per_class and all(counts[c] >= args.max_per_class for c in (1, 2)):

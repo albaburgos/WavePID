@@ -7,6 +7,7 @@ Run from this directory (server options such as --port go before --args, script 
     bokeh serve --show vis.py                                   # newest run of either source
     bokeh serve --show --port 5007 vis.py --args pred           # newest run trained on the inferred profile
     bokeh serve --show vis.py --args logs/classify_gamma/truth/lightning_logs/version_0
+    bokeh serve --show vis.py --args pred_gev_evisz_s85_both_none_nomatch   # newest run of a tagged build (its directory under logs/classify_gamma)
 """
 import sys
 from pathlib import Path
@@ -22,7 +23,7 @@ from classify_gamma import LOG_DIR, GammaClassifier, best_checkpoint  # noqa: E4
 
 script_args = [a for a in sys.argv[1:] if not a.startswith("--")]   # bokeh options such as --port belong before --args
 arg = script_args[0] if script_args else None
-if arg in ("truth", "pred"):
+if arg and (LOG_DIR / arg / "lightning_logs").is_dir():               # "truth", "pred" or a tagged build such as pred_<tag>_nomatch
     runs = list((LOG_DIR / arg / "lightning_logs").glob("version_*"))
 elif arg:
     runs = [Path(arg)]

@@ -15,6 +15,8 @@ Problem (../Claude outputs/nc_cc_profile_inference.pdf, Sec. 2 and 3.1)
                (the note's known kappa = (E, v, t_v)); known_axis appends cos psi_d = (r_d - v).u / |r_d - v|, the
                angle of each module to the shower axis (the note's "direction also known" case), after which only
                the profile itself is unknown.  Both are invariant under the rotation augmentation below.
+               known_vertex = False drops the vertex: the tokens are then taken about the earliest-hit module instead of v
+               (a median 6 m off on the 10 m lattice; t_v = 0 stays known), e.g. "energy and direction known, vertex unknown".
     data       D = per module d its photoelectron time profile (T_BIN_NS bins, last bin = overflow) and summaries
 
 Model
@@ -38,9 +40,19 @@ Usage (from this directory; inputs are the OMSim part directories, all outputs s
 edit the `Settings` defaults below and run `python pulse_regressor.py`, or call `main(Settings(...))` from Python.
     build = [Path("../out/nue_cc_multidom"), Path("../out/nue_nc_multidom")]   # -> pulse_regressor_truth.parquet (+ _meta.json)
     train = True, epochs = 100                                                 # -> pulse_regressor_neptune_val.npz
+    tag = "1tev"                                                               # -> pulse_regressor_1tev_* files, logs/neptune_1tev:
+                                                                               #    a second dataset next to the GeV one (other layout)
     train = True, known_energy = True                                          # vertex and energy known
     train = True, known_energy = True, known_axis = True                       # vertex, energy and axis known
+    train = True, known_energy = True, known_axis = True, known_vertex = False # energy and axis known, vertex not
+    run = "energy-axis"                                                        # keeps this training's outputs apart:
+                                                                               #    pulse_regressor_1tev_energy-axis_neptune_val.npz,
+                                                                               #    logs/neptune_1tev_energy-axis
     evaluate = Path("logs/neptune/version_N/checkpoints/best-epoch=K.ckpt")   # summary of a saved checkpoint, no training
+    train = True, weights = "w_qmatch", run = "qmatch"                        # weighted NLL: per-event weights from the column
+                                                                               #    w_qmatch of pythia_nue_1tev/weights_1tev.parquet
+                                                                               #    (flux_weighting.ipynb sec. 9: CC matched onto the
+                                                                               #    NC Q_tot histogram), joined on (cls, part, eventID)
 The build shuffles the events once and marks a fixed 20 % validation split (`is_val`) shared by every method.
 Logs and checkpoints: logs/neptune/version_N.  Solution B (profile-likelihood fit with an analytic photon
 kernel) is profile_likelihood.py in this directory and works on the same dataset.
@@ -70,6 +82,21 @@ META_FILE = ROOT / "pulse_regressor_meta.json"
 TRUTH_FILE = ROOT / "pulse_regressor_truth.parquet"
 PRED_FILE = ROOT / "pulse_regressor_neptune_val.npz"
 LOG_DIR = ROOT / "logs"
+LOG_NAME = "neptune"
+WEIGHT_TABLE = ROOT / "pythia_nue_1tev" / "weights_1tev.parquet"   # flux_weighting.ipynb: flux weights and w_qmatch per (cls, part, eventID)
+
+
+def set_tag(tag: str, run: str = ""):
+    """Point the dataset, prediction and log names at a tagged copy (Settings.tag), e.g. pulse_regressor_1tev_truth.parquet.
+    A run label (Settings.run) keeps the predictions and logs of several trainings on one dataset apart:
+    pulse_regressor_1tev_energy-axis_neptune_val.npz, logs/neptune_1tev_energy-axis."""
+    global META_FILE, TRUTH_FILE, PRED_FILE, LOG_NAME
+    suffix = f"_{tag}" if tag else ""
+    run_suffix = f"{suffix}_{run}" if run else suffix
+    META_FILE = ROOT / f"pulse_regressor{suffix}_meta.json"
+    TRUTH_FILE = ROOT / f"pulse_regressor{suffix}_truth.parquet"
+    PRED_FILE = ROOT / f"pulse_regressor{run_suffix}_neptune_val.npz"
+    LOG_NAME = f"neptune{run_suffix}"
 
 TARGETS = ["ln_a", "ln_b"]
 VERTEX = ["vx", "vy", "vz"]
@@ -95,16 +122,23 @@ class Settings:
     min_hits: int = 5                           # drop events with fewer hits in all modules
     train: bool = False                         # train the Neptune posterior q(ln a, ln b | hits)
     evaluate: Path = None                       # checkpoint to evaluate (after training, if both); None skips
+    weights: str = ""                           # column of WEIGHT_TABLE used as per-event weight of the NLL in training and
+                                                # validation, e.g. "w_qmatch" (CC reweighted onto the NC Q_tot histogram); "": unweighted
     known_energy: bool = False                  # append ln E_vis to the inputs (the note's known-E case)
     known_axis: bool = False                    # append cos(angle between module direction and true shower axis) to every token
+    known_vertex: bool = True                   # tokens about the true vertex; False: about the earliest-hit module (vertex unknown)
     augment: bool = True                        # random rotations of the training events about the vertex
     epochs: int = 100
     lr: float = 1e-3
     batch_size: int = 64
     token_dim: int = 64                         # Neptune token dimension (a multiple of 4 * 8)
     layers: int = 3                             # Neptune transformer layers
-    accelerator: str = "cpu"
+    accelerator: str = "mps"
     seed: int = 1234                            # build shuffle, torch, and the rotation augmentation
+    tag: str = ""                               # dataset tag: "" -> pulse_regressor_*.{parquet,json,npz}, logs/neptune;
+                                                # "1tev" -> pulse_regressor_1tev_*, logs/neptune_1tev (GeV and TeV sets coexist)
+    run: str = ""                               # run label: "" -> pulse_regressor_<tag>_neptune_val.npz, logs/neptune_<tag>;
+                                                # "energy-axis" -> pulse_regressor_<tag>_energy-axis_neptune_val.npz, logs/neptune_<tag>_energy-axis
 
 
 def set_features(n_modules: int):
@@ -233,6 +267,23 @@ def load_dataset():
     return pd.read_parquet(TRUTH_FILE), meta
 
 
+def event_weights(df, column):
+    """Per-event weights WEIGHT_TABLE[column] joined on (cls, part, eventID); 0 where the table has no row."""
+    tabs = [t for t in sorted(ROOT.glob("pythia_*/weights_*.parquet")) if column in pd.read_parquet(t).columns]   # one per tag
+    if not tabs:
+        raise SystemExit(f"no pythia_*/weights_*.parquet with a column {column!r}: run make_weights.py --tag {TRUTH_FILE.stem} (Settings.weights = {column!r})")
+    tab = pd.concat([pd.read_parquet(t, columns=["cls", "part", "eventID", column]) for t in tabs], ignore_index=True)
+    keys = df[["cls", "part", "eventID"]].astype({"cls": str, "part": str, "eventID": int})
+    w = keys.merge(tab, on=["cls", "part", "eventID"], how="left")[column].to_numpy(float)
+    n_missing = int(np.isnan(w).sum())
+    w = np.nan_to_num(w, nan=0.0).astype(np.float32)
+    if not (w > 0).any():
+        raise SystemExit(f"no event of {TRUTH_FILE.name} has a non-zero {column!r} in {', '.join(t.name for t in tabs)} (wrong dataset tag?)")
+    print(f"weights {column!r} from {', '.join(t.name for t in tabs)}: {n_missing} of {len(df)} events without a row, {int((w == 0).sum())} with weight 0, "
+          f"max {w.max():.2f}, n_eff {w.sum() ** 2 / (w ** 2).sum():,.0f}")
+    return w
+
+
 def module_counts(df, meta):
     """n_dk [N, M, K] and n_d [N, M] of the rows of df, from the flat feature columns."""
     X = df[FEATURES].to_numpy(float).reshape(len(df), len(meta["module_positions"]), len(MODULE_FEATURES))
@@ -258,17 +309,23 @@ def random_rotation(rng):
 class EventSet(torch.utils.data.Dataset):
     """Per event: hit-module tokens (coords [n, 4] in km/us, features [n, F]) for Neptune and the z-scored target y.
     With augment=True the token positions (relative to the vertex) are rotated at random per access; distances and
-    times are unchanged."""
+    times are unchanged.  With known_vertex=False the reference point is the earliest-hit module instead of the
+    vertex (the vertex is then unknown to the network; the first light arrives at the modules nearest the vertex)."""
 
-    def __init__(self, df, meta, known_energy=False, augment=False, seed=0, known_axis=False):
+    def __init__(self, df, meta, known_energy=False, augment=False, seed=0, known_axis=False, known_vertex=True, weights=None):
         self.augment, self.rng, self.known_energy, self.known_axis = augment, np.random.default_rng(seed), known_energy, known_axis
+        self.w = np.ones(len(df), np.float32) if weights is None else np.asarray(weights, np.float32)   # per-event NLL weight
         self.u = df[AXIS].to_numpy(np.float32)                                 # true shower axis (used with known_axis)
         pos = np.asarray(meta["module_positions"], float)                    # [M, 3]
         X = df[FEATURES].to_numpy(np.float32).reshape(len(df), len(pos), len(MODULE_FEATURES))
         self.n, self.summary, self.hist = X[:, :, 0], X[:, :, 1:len(SUMMARY)], X[:, :, len(SUMMARY):]
-        self.rel = (pos[None] - df[VERTEX].to_numpy(np.float32)[:, None]).astype(np.float32)   # r_d - v [m]
+        if known_vertex:
+            ref = df[VERTEX].to_numpy(np.float32)                               # the true vertex v
+        else:                                                                  # vertex unknown: the earliest-hit module stands in
+            ref = pos[np.where(self.n > 0, self.summary[:, :, 0], np.inf).argmin(1)].astype(np.float32)
+        self.rel = (pos[None] - ref[:, None]).astype(np.float32)               # r_d - v [m] (or r_d - r_first)
         self.dist = np.linalg.norm(self.rel, axis=2)
-        self.y = df[[f"z_{k}" for k in TARGETS]].to_numpy(np.float32)
+        self.y = df[[f"z_{k}" for k in TARGETS]].to_numpy(np.float32).copy()      # writable: from_numpy warns on a pandas view
         self.ln_e = np.log(df.E_vis_gev.to_numpy(np.float32))
 
     def __len__(self):
@@ -282,17 +339,17 @@ class EventSet(torch.utils.data.Dataset):
         if self.known_energy:
             feats.append(np.full((hit.sum(), 1), self.ln_e[i], np.float32))
         if self.known_axis:                          # cos psi_d: module direction against the shower axis, rotation invariant
-            feats.append(((self.rel[i, hit] @ self.u[i]) / dist)[:, None])
+            feats.append(((self.rel[i, hit] @ self.u[i]) / np.maximum(dist, 1e-6))[:, None])   # dist = 0 at the reference module
         rel = self.rel[i, hit] @ random_rotation(self.rng).T if self.augment else self.rel[i, hit]
         coords = np.c_[rel * 1e-3, s[:, :1] * 1e-3]                            # (r_d - v) [km], t_first [us]
         return (torch.from_numpy(coords.astype(np.float32)), torch.from_numpy(np.concatenate(feats, 1).astype(np.float32)),
-                torch.from_numpy(self.y[i]), i)
+                torch.from_numpy(self.y[i]), torch.tensor(self.w[i]), i)
 
 
 def collate(batch):
-    coords, feats, y, idx = zip(*batch)
+    coords, feats, y, w, idx = zip(*batch)
     batch_ids = torch.cat([torch.full((len(c),), b, dtype=torch.long) for b, c in enumerate(coords)])
-    return torch.cat(coords), torch.cat(feats), batch_ids, torch.stack(y), torch.tensor(idx)
+    return torch.cat(coords), torch.cat(feats), batch_ids, torch.stack(y), torch.stack(w), torch.tensor(idx)
 
 
 # ----------------------------------------------------------------------------------------------------------
@@ -321,7 +378,7 @@ class ProfilePosterior(L.LightningModule):
     """q(y | D) = N(mu(D), Sigma(D)) with the Neptune encoder"""
 
     def __init__(self, n_point_features, n_modules, lr=1e-3, token_dim=64, layers=3, heads=4,
-                 dropout=0.1, known_energy=False, known_axis=False):      # the two flags are stored for evaluate
+                 dropout=0.1, known_energy=False, known_axis=False, known_vertex=True, weights=""):   # flags stored for evaluate
         super().__init__()
         self.save_hyperparameters()
         
@@ -337,9 +394,12 @@ class ProfilePosterior(L.LightningModule):
         return self.net(coords, feats, batch_ids, batch_size=batch_size)
 
     def _step(self, batch, stage):
-        coords, feats, batch_ids, y, _ = batch
-        loss = gaussian_nll(self(coords, feats, batch_ids, y.size(0)), y).mean()
+        coords, feats, batch_ids, y, w, _ = batch
+        nll = gaussian_nll(self(coords, feats, batch_ids, y.size(0)), y)
+        loss = (w * nll).sum() / w.sum().clamp_min(1e-6)           # weighted mean NLL (the plain mean when every w = 1)
         self.log(f"{stage}_loss", loss, prog_bar=True, on_step=False, on_epoch=True, batch_size=y.size(0))
+        if self.hparams.get("weights"):
+            self.log(f"{stage}_nll_unweighted", nll.mean(), on_step=False, on_epoch=True, batch_size=y.size(0))
         return loss
 
     def training_step(self, batch, _):
@@ -358,10 +418,20 @@ class ProfilePosterior(L.LightningModule):
 # 4. training, prediction, evaluation
 # ----------------------------------------------------------------------------------------------------------
 def datasets(df, meta, cfg):
-    """Training and validation EventSets, plus the validation rows as a dataframe."""
-    train, val = df[~df.is_val], df[df.is_val]
-    return (EventSet(train, meta, cfg.known_energy, augment=cfg.augment, seed=cfg.seed, known_axis=cfg.known_axis),
-            EventSet(val, meta, cfg.known_energy, known_axis=cfg.known_axis), val, cfg.augment)
+    """Training and validation EventSets (with the per-event weights of cfg.weights, if any), plus the validation rows."""
+    is_val = df.is_val.to_numpy(bool)
+    train, val = df[~is_val], df[is_val]
+    w_train = w_val = None
+    if cfg.weights:
+        w = event_weights(df, cfg.weights)
+        w_train, w_val = w[~is_val], w[is_val]
+        keep = w_train > 0
+        if not keep.all():
+            print(f"  training: {int((~keep).sum())} of {len(keep)} events with weight 0 dropped (validation keeps all, weight 0 in its NLL)")
+            train, w_train = train[keep], w_train[keep]
+    return (EventSet(train, meta, cfg.known_energy, augment=cfg.augment, seed=cfg.seed, known_axis=cfg.known_axis,
+                     known_vertex=cfg.known_vertex, weights=w_train),
+            EventSet(val, meta, cfg.known_energy, known_axis=cfg.known_axis, known_vertex=cfg.known_vertex, weights=w_val), val, cfg.augment)
 
 
 def predict(model, loader, meta):
@@ -369,7 +439,7 @@ def predict(model, loader, meta):
     model.eval().cpu()
     outs = []
     with torch.no_grad():
-        for coords, feats, batch_ids, y, _ in loader:
+        for coords, feats, batch_ids, y, _, _ in loader:
             outs.append(model(coords, feats, batch_ids, y.size(0)))
     mu_z, L_z = gaussian_head(torch.cat(outs))
     s = np.array([meta["target_std"][k] for k in TARGETS]); m = np.array([meta["target_mean"][k] for k in TARGETS])
@@ -379,7 +449,8 @@ def predict(model, loader, meta):
 def save_predictions(val, y, mu, Sigma):
     np.savez(PRED_FILE, y=y, mu=mu, Sigma=Sigma, E_vis_gev=val.E_vis_gev.to_numpy(), nhits=val.nhits.to_numpy(),
              n_tracks=val.n_tracks.to_numpy() if "n_tracks" in val else np.full(len(val), np.nan),
-             eventID=val.eventID.to_numpy(), cls=val.cls.to_numpy().astype(str), targets=np.array(TARGETS))
+             eventID=val.eventID.to_numpy(), cls=val.cls.to_numpy().astype(str), targets=np.array(TARGETS),
+             part=val.part.to_numpy().astype(str))          # (cls, part, eventID) is the key of the flux-weight table
     print(f"wrote {PRED_FILE.name}")
 
 
@@ -392,14 +463,16 @@ def fit_posterior(cfg):
     dl_val = torch.utils.data.DataLoader(ds_val, shuffle=False, **kw)
     model = ProfilePosterior(N_POINT_FEATURES + int(cfg.known_energy) + int(cfg.known_axis), meta["n_modules"],
                              lr=cfg.lr, token_dim=cfg.token_dim, layers=cfg.layers,
-                             known_energy=cfg.known_energy, known_axis=cfg.known_axis)
+                             known_energy=cfg.known_energy, known_axis=cfg.known_axis, known_vertex=cfg.known_vertex, weights=cfg.weights)
     print(f"neptune: {sum(p.numel() for p in model.parameters()):,} parameters, {len(ds_train)} train / {len(ds_val)} val events"
           + (", ln E appended to the inputs" if cfg.known_energy else ", energy not given")
           + (", cos(module, axis) appended to the tokens" if cfg.known_axis else ", axis not given")
-          + (", random rotations about the vertex in training" if augment else ""))
+          + ("" if cfg.known_vertex else ", vertex not given (tokens about the earliest-hit module)")
+          + (", random rotations about the vertex in training" if augment else "")
+          + (f", NLL weighted with {cfg.weights!r} (train and val)" if cfg.weights else ""))
     best = ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1, filename="best-{epoch}")
     trainer = L.Trainer(accelerator=cfg.accelerator, max_epochs=cfg.epochs, log_every_n_steps=10,
-                        logger=TensorBoardLogger(save_dir=str(LOG_DIR), name="neptune"), num_sanity_val_steps=0,
+                        logger=TensorBoardLogger(save_dir=str(LOG_DIR), name=LOG_NAME), num_sanity_val_steps=0,
                         enable_progress_bar=False, callbacks=[best], gradient_clip_val=1.0)
     trainer.fit(model, dl_train, dl_val)
     metrics = {k: float(v) for k, v in trainer.callback_metrics.items()}
@@ -417,7 +490,8 @@ def evaluate_checkpoint(cfg):
     df, meta = load_dataset()
     model = ProfilePosterior.load_from_checkpoint(cfg.evaluate)
     cfg = replace(cfg, known_energy=bool(model.hparams.get("known_energy", cfg.known_energy)),   # inputs as at training time
-                  known_axis=bool(model.hparams.get("known_axis", cfg.known_axis)))
+                  known_axis=bool(model.hparams.get("known_axis", cfg.known_axis)),
+                  known_vertex=bool(model.hparams.get("known_vertex", cfg.known_vertex)))
     _, ds_val, val, _ = datasets(df, meta, cfg)
     dl_val = torch.utils.data.DataLoader(ds_val, batch_size=cfg.batch_size, collate_fn=collate, num_workers=0)
     mu, Sigma = predict(model, dl_val, meta)
@@ -430,6 +504,9 @@ def main(cfg=None):
     cfg = Settings() if cfg is None else cfg
     if not (cfg.build or cfg.train or cfg.evaluate):
         raise SystemExit("nothing to do: set build, train and/or evaluate in Settings")
+    set_tag(cfg.tag, cfg.run)
+    if cfg.tag or cfg.run:
+        print(f"dataset tag '{cfg.tag}', run '{cfg.run}': {TRUTH_FILE.name}, {PRED_FILE.name}, logs/{LOG_NAME}")
     torch.manual_seed(cfg.seed)
     if cfg.build:
         build(cfg)

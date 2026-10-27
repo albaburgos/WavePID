@@ -18,14 +18,16 @@
 #SBATCH --output=%x_%A_%a.out
 set -eo pipefail
 CLASS=${CLASS:-nue_cc}; TAG=${TAG:-multidom}
-D=$HOME/IceCube/wavepid/out/cluster/${CLASS}_${TAG}
+OUTROOT=${OUTROOT:-$HOME/IceCube/wavepid/out}
+D=$OUTROOT/cluster/${CLASS}_${TAG}
 part=$(printf "part_%04d" "$SLURM_ARRAY_TASK_ID")
 [ -f "$D/${part}_hits.root" ] || { echo "no $D/${part}_hits.root"; exit 1; }
 source $HOME/IceCube/wavepid/cluster/env_fasrc.sh
 mkdir -p "${D}_slim"
 if [ ! -f "$D/${part}_profile_params.csv" ]; then
     echo "fitting profiles of $part"
-    python $HOME/IceCube/wavepid/gamma_functions.py "$D/${part}_hits.root" --all-events
+    GAMMA=$HOME/IceCube/wavepid/gamma_functions.py; [ -f "$GAMMA" ] || GAMMA=$HOME/IceCube/wavepid/Xgamma_functions.py
+    python "$GAMMA" "$D/${part}_hits.root" --all-events
 fi
 rootcp --recreate "$D/${part}_hits.root:PhotonHits" "$D/${part}_hits.root:Events" "${D}_slim/${part}_hits.root"
 cp "$D/${part}_doms.json" "$D/${part}_profile_params.csv" "${D}_slim/"

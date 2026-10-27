@@ -1,0 +1,1268 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index dde8b18e..b06f04e4 100755
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -25,8 +25,10 @@ add_definitions(-DBOOST_BIND_GLOBAL_PLACEHOLDERS)
+ list(APPEND CMAKE_MODULE_PATH ${Geant4_DIR}/Modules)
+ 
+ # Set paths for OpenSSL
+-set(OPENSSL_ROOT_DIR /usr/lib/x86_64-linux-gnu)
+-set(OPENSSL_LIBRARIES /usr/lib/x86_64-linux-gnu)
++if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT DEFINED OPENSSL_ROOT_DIR)
++    set(OPENSSL_ROOT_DIR /usr/lib/x86_64-linux-gnu)
++    set(OPENSSL_LIBRARIES /usr/lib/x86_64-linux-gnu)
++endif()
+ find_package(OpenSSL REQUIRED)
+ 
+ # For logging with spdlog
+diff --git a/common/framework/src/OMSimHitManager.cc b/common/framework/src/OMSimHitManager.cc
+index f2606ab3..ee393f1e 100644
+--- a/common/framework/src/OMSimHitManager.cc
++++ b/common/framework/src/OMSimHitManager.cc
+@@ -292,7 +292,7 @@ std::vector<int> OMSimHitManager::calculateMultiplicity(const G4double p_timeWin
+ 			continue;
+ 		}
+ 
+-		int hitPMT[numberOfPMTs] = {0};
++		std::vector<int> hitPMT(numberOfPMTs, 0);
+ 		hitPMT[hitsOfModule.PMTnr.at(i)] = 1;
+ 		int currentSum = 0;
+ 
+diff --git a/simulations/CMakeLists.txt b/simulations/CMakeLists.txt
+index 23b0123c..c36c7cfe 100755
+--- a/simulations/CMakeLists.txt
++++ b/simulations/CMakeLists.txt
+@@ -2,4 +2,4 @@ add_subdirectory(effective_area)
+ #add_subdirectory(radioactive_decays)
+ #add_subdirectory(supernova)
+ #add_subdirectory(efficiency_calibration)
+-#add_subdirectory(wavepid)
++add_subdirectory(wavepid)
+diff --git a/simulations/wavepid/CMakeLists.txt b/simulations/wavepid/CMakeLists.txt
+index 9fd0b394..b1cc187c 100644
+--- a/simulations/wavepid/CMakeLists.txt
++++ b/simulations/wavepid/CMakeLists.txt
+@@ -10,6 +10,7 @@ list(FILTER WAVEPID_COMMON_SOURCES EXCLUDE REGEX ".*OMSimSensitiveDetector\\.cc$
+ list(FILTER WAVEPID_COMMON_SOURCES EXCLUDE REGEX ".*OMSimHitManager\\.cc$")
+ list(FILTER WAVEPID_COMMON_SOURCES EXCLUDE REGEX ".*OMSim\\.cc$")
+ list(FILTER WAVEPID_COMMON_SOURCES EXCLUDE REGEX ".*OMSimActionInitialization\\.cc$")
++list(FILTER WAVEPID_COMMON_SOURCES EXCLUDE REGEX ".*OMSimSteppingAction\\.cc$")
+ 
+ # Create list of WavePID-specific source files (our enhanced versions)
+ file(GLOB WAVEPID_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cc")
+diff --git a/simulations/wavepid/OMSim_WavePID_study.cc b/simulations/wavepid/OMSim_WavePID_study.cc
+index 521b1fee..59c7a305 100644
+--- a/simulations/wavepid/OMSim_WavePID_study.cc
++++ b/simulations/wavepid/OMSim_WavePID_study.cc
+@@ -31,13 +31,53 @@ void addModuleOptions(OMSim* p_simulation)
+         ("primary_energy,e", po::value<G4double>()->default_value(10.0),
+             "Primary particle energy in GeV")
+         ("primary_particle,p", po::value<std::string>()->default_value("mu-"),
+-            "Primary particle type (mu-, mu+, e-, e+)")
++            "Primary particle type (mu-, mu+, e-, e+; with --hadronic also pi-, pi+, proton, kaon-, ...)")
+         ("DOM_zenith,z", po::value<G4double>()->default_value(0.0),
+             "Zenith angle of DOM orientation in degrees")
+         ("DOM_azimuth,a", po::value<G4double>()->default_value(0.0),
+             "Azimuth angle of DOM orientation in degrees")
+         ("macro,m", po::value<std::string>()->default_value(""),
+-            "Path to macro file to execute (overrides -d, -e, -p if GPS commands used)");
++            "Path to macro file to execute (overrides -d, -e, -p if GPS commands used)")
++        ("event_file", po::value<std::string>()->default_value(""),
++            "Text file with pre-generated final states, one particle per line: "
++            "'<event index> <G4 name> <kinetic E GeV> <dx> <dy> <dz>' in the frame where the neutrino moves along +x. "
++            "All particles of an event start at the standard vertex (-1.7 d, 0, d). Overrides -p/-e; use with -n <#events>")
++        ("world_radius", po::value<G4double>()->default_value(30.0),
++            "Radius of the ice world sphere in m. Must exceed 1.7*impact_parameter so the primary starts inside it")
++        ("photon_kill_distance", po::value<G4double>()->default_value(0.0),
++            "Kill optical photons farther than this from the module (m) that are moving away from it; "
++            "0 disables. Large speed-up for large impact parameters without changing detected hits")
++        ("track_secondaries_first", po::bool_switch()->default_value(false),
++            "Track Cherenkov photons before continuing the parent (original behaviour). Suppresses hadronic interactions of the primary; do not combine with --hadronic")
++        ("hadronic", po::bool_switch()->default_value(false),
++            "Add hadronic physics (FTFP_BERT) so hadron primaries (pi-, pi+, proton, kaon-, ...) produce hadronic cascades")
++        ("photon_tracks", po::value<G4double>()->default_value(0.0),
++            "Write a PhotonTracks tree with the step points (mm, ns) of every non-photon track, every detected "
++            "optical photon and this fraction of the other optical photons (0 = off). For visualising single "
++            "events; use without --multithreading and --photon_kill_distance")
++        ("photon_fraction", po::value<G4double>()->default_value(1.0),
++            "Keep only this fraction F of the Cherenkov photons at creation and divide the PMT detection probability by F, "
++            "so the detected hits are statistically unchanged while the simulation runs ~1/F times faster. Exact while "
++            "QE x CE <= F at every wavelength (DOM R7081: max 0.245, so F >= 0.25). Meant for use with --efficiency_cut")
++        ("qe_scale", po::value<G4double>()->default_value(1.0),
++            "Multiply the PMT detection probability (QE x CE) by this factor: 1.35 = DeepCore high-QE R7081-02MOD relative to "
++            "the standard R7081-02 of the DOM model. Applied before the --efficiency_cut; with --photon_fraction F the exactness "
++            "condition becomes QE x CE x qe_scale <= F (1.35: F >= 0.34)")
++        ("charged_tracks", po::value<G4double>()->default_value(1.0),
++            "With --photon_tracks: record only this fraction of the non-photon tracks in the PhotonTracks tree "
++            "(uniform random pick per track; 1 = all). Keeps the tree affordable for TeV showers; the longitudinal "
++            "profile fitted by gamma_functions.py is unbiased, only its normalisation (n_tracks, track_len_m) shrinks")
++        ("dom_layout", po::value<std::string>()->default_value(""),
++            "Several optical modules instead of one at the origin: 'string:N:S' = N modules along z with spacing S m, "
++            "'grid:NX:NY:NZ:S' = regular grid with spacing S m, 'fill:S[:R]' = every lattice point of spacing S within R m "
++            "of the origin (default R = world_radius - 1.5, so all modules near any vertex exist), all centred on the origin. Positions go to <output>_doms.json, "
++            "every hit carries moduleID (--detector_type 2..7 only)")
++        ("random_vertex", po::value<G4double>()->default_value(0.0),
++            "--event_file: place each event's vertex uniformly in the cube [-R, R]^3 m around the origin "
++            "(0 = fixed vertex at (-1.7 d, 0, d)); the vertex is written to the Events tree")
++        ("random_rotation", po::bool_switch()->default_value(false),
++            "--event_file: rotate each event's final state by a uniformly random rotation; the rotated neutrino "
++            "direction is written to the Events tree (nu_dx, nu_dy, nu_dz)");
+ 
+     p_simulation->extendOptions(wavepidOptions);
+ }
+diff --git a/simulations/wavepid/include/OMSimHitManager.hh b/simulations/wavepid/include/OMSimHitManager.hh
+index 08e66903..7f458311 100644
+--- a/simulations/wavepid/include/OMSimHitManager.hh
++++ b/simulations/wavepid/include/OMSimHitManager.hh
+@@ -89,7 +89,7 @@ public:
+         G4ThreeVector pMomentumDirection,
+         G4ThreeVector pGlobalPos,
+         G4ThreeVector pLocalPos,
+-        G4double p_distance,
++        G4ThreeVector p_delta,          ///< photon creation point minus hit point (mm); |p_delta| = generationDetectionDistance
+         OMSimPMTResponse::PMTPulse pResponse,
+         G4String pPhotonOrigin,
+         G4int pParentID,
+@@ -98,6 +98,14 @@ public:
+         G4double p_wavelength,
+         G4int pModuleIndex);
+ 
++    /// Record one simulated event in the ROOT "Events" tree (primary energy in GeV, particle name).
++    void recordEvent(G4int p_eventid, G4double p_energyGeV, const std::string& p_particle,
++                     const G4ThreeVector& p_vertexM, const G4ThreeVector& p_nuDir);
++    /// Record one track's step points in the ROOT "PhotonTracks" tree (--photon_tracks).
++    void recordTrack(G4int p_eventid, G4int p_trackID, G4int p_parentID, const std::string& p_particle,
++                     const std::string& p_creator, G4double p_energyMeV, G4double p_wavelengthNm, G4int p_detected,
++                     const std::vector<float>& x, const std::vector<float>& y,
++                     const std::vector<float>& z, const std::vector<float>& t);
+     void reset();
+     std::vector<double> countMergedHits(int pModuleIndex = 0, bool pDEweight = false);
+     void setNumberOfPMTs(int pNumberOfPMTs, int pModuleIndex = 0);
+diff --git a/simulations/wavepid/include/OMSimPhysicsList.hh b/simulations/wavepid/include/OMSimPhysicsList.hh
+index e4e2796f..4d1fe125 100644
+--- a/simulations/wavepid/include/OMSimPhysicsList.hh
++++ b/simulations/wavepid/include/OMSimPhysicsList.hh
+@@ -8,6 +8,7 @@
+ #pragma once
+ 
+ #include <G4VUserPhysicsList.hh>
++#include <vector>
+ 
+ class G4VPhysicsConstructor;
+ class G4ProductionCuts;
+@@ -29,4 +30,12 @@ protected:
+     void ConstructParticle() override;
+     void ConstructProcess() override;
+     void SetCuts() override;
++
++private:
++    /// Optional hadronic physics (FTFP_BERT + elastic + decay + stopping + ions).
++    /// Enabled with --hadronic so that pi+-, K, p, ... primaries produce hadronic
++    /// cascades (NC-like events). Default: EM + optical only, as in the original study.
++    bool m_hadronic = false;
++    std::vector<G4VPhysicsConstructor*> m_hadronicConstructors;
++    void addHadronEMProcesses();
+ };
+diff --git a/simulations/wavepid/include/OMSimPrimaryGeneratorAction.hh b/simulations/wavepid/include/OMSimPrimaryGeneratorAction.hh
+index 0b1336de..f7fa59ef 100644
+--- a/simulations/wavepid/include/OMSimPrimaryGeneratorAction.hh
++++ b/simulations/wavepid/include/OMSimPrimaryGeneratorAction.hh
+@@ -8,6 +8,8 @@
+ #include <G4AutoLock.hh>
+ #include <G4ThreeVector.hh>
+ #include <memory>
++#include <string>
++#include <vector>
+ 
+ class G4ParticleGun;
+ class G4GeneralParticleSource;
+@@ -30,8 +32,22 @@ public:
+ 
+     void GeneratePrimaries(G4Event* anEvent) override;
+ 
++    /// Neutrino direction of the event last generated on this thread (+x rotated by --random_rotation).
++    static G4ThreeVector lastNuDirection() { return s_lastNuDir; }
++
++    /// One final-state particle of a pre-generated event (see --event_file).
++    struct FinalStateParticle { std::string name; double kineticEnergyGeV; G4ThreeVector direction; };
++
+ private:
+     void setupParticleGun();
++    void loadEventFile(const std::string& path);
++    void generateFromEventFile(G4Event* anEvent);
++    static std::vector<std::vector<FinalStateParticle>> m_events;  ///< shared, read once
++    static bool m_eventsLoaded;
++    bool m_useEventFile = false;
++    double m_randomVertexM = 0.0;    ///< --random_vertex: half-width of the vertex cube [m], 0 = fixed
++    bool m_randomRotation = false;   ///< --random_rotation
++    static thread_local G4ThreeVector s_lastNuDir;
+ 
+     static thread_local std::unique_ptr<G4ParticleGun> m_particleGun;
+     static thread_local std::unique_ptr<G4GeneralParticleSource> m_particleSource;
+diff --git a/simulations/wavepid/include/OMSimSensitiveDetector.hh b/simulations/wavepid/include/OMSimSensitiveDetector.hh
+index cdd91531..3c9d7771 100644
+--- a/simulations/wavepid/include/OMSimSensitiveDetector.hh
++++ b/simulations/wavepid/include/OMSimSensitiveDetector.hh
+@@ -69,6 +69,8 @@ public:
+ 
+ private:
+     bool m_QEcut;
++    double m_photonFraction = 1.0;   ///< --photon_fraction: photons were thinned at creation by this factor
++    double m_qeScale = 1.0;          ///< --qe_scale: PMT detection probability multiplier (HQE PMTs)
+     OMSimPMTResponse* m_PMTResponse;
+     DetectorType m_detectorType;
+ 
+diff --git a/simulations/wavepid/include/OMSimStackingAction.hh b/simulations/wavepid/include/OMSimStackingAction.hh
+new file mode 100644
+index 00000000..02e083af
+--- /dev/null
++++ b/simulations/wavepid/include/OMSimStackingAction.hh
+@@ -0,0 +1,26 @@
++#pragma once
++/**
++ * @file OMSimStackingAction.hh
++ * @brief Keeps the Geant4 track stack small: optical photons are tracked first.
++ *
++ * Without this, every Cherenkov photon of a cascade sits on the stack until the
++ * whole sub-shower that created it has been processed, i.e. millions of G4Track
++ * objects (about 1 GB per 30 GeV event per worker thread). Putting all
++ * non-photon secondaries on the "waiting" stack means a charged particle's
++ * photons are tracked (and freed) as soon as that particle is done, while the
++ * parent is never suspended (which is what broke hadronic interactions with
++ * G4Cerenkov::SetTrackSecondariesFirst(true)).
++ */
++#include <G4UserStackingAction.hh>
++#include <G4ClassificationOfNewTrack.hh>
++#include <G4Types.hh>
++
++class OMSimStackingAction : public G4UserStackingAction
++{
++public:
++    OMSimStackingAction();
++    G4ClassificationOfNewTrack ClassifyNewTrack(const G4Track* track) override;
++
++private:
++    G4double m_photonFraction = 1.0;   ///< --photon_fraction: fraction of optical photons kept at creation
++};
+diff --git a/simulations/wavepid/include/OMSimTrackingAction.hh b/simulations/wavepid/include/OMSimTrackingAction.hh
+index e74b9409..35eb7cb8 100644
+--- a/simulations/wavepid/include/OMSimTrackingAction.hh
++++ b/simulations/wavepid/include/OMSimTrackingAction.hh
+@@ -9,8 +9,10 @@
+ 
+ #include "G4UserTrackingAction.hh"
+ #include "G4Track.hh"
++#include "G4ThreeVector.hh"
+ #include <unordered_map>
+ #include <string>
++#include <vector>
+ 
+ /**
+  * @class OMSimTrackingAction
+@@ -55,9 +57,28 @@ public:
+      */
+     static bool HasInstance() { return instance != nullptr; }
+ 
++    /// Forget all tracks of the previous event. Called at BeginOfEventAction;
++    /// without it the maps grow by every track of every event (GBs per thread).
++    void Reset();
++
++    // --photon_tracks: step-point recording of the track currently being followed.
++    // Geant4 follows one track at a time per thread, so a single buffer is enough; it is
++    // flushed to the PhotonTracks tree in PostUserTrackingAction when the track is a
++    // non-photon, a detected photon, or a photon picked by the sampling fraction.
++    bool RecordingEnabled() const { return m_trackFraction > 0.0; }
++    void AddStep(const G4ThreeVector& pos, G4double time);
++    void MarkDetected() { m_detectedCurrent = true; }
++
+ private:
+     std::unordered_map<G4int, std::string> m_trackIDToParticleTypeMap;
+     std::unordered_map<G4int, std::string> m_trackIDToCreatorProcessMap;
+ 
++    G4double m_trackFraction = 0.0;      ///< --photon_tracks (0 = off)
++    G4double m_chargedFraction = 1.0;    ///< --charged_tracks: fraction of non-photon tracks recorded
++    bool m_recordCurrent = false;        ///< current track selected for the tree
++    bool m_detectedCurrent = false;      ///< current photon ended in the photocathode
++    bool m_bufferActive = false;         ///< buffer holds the current track
++    std::vector<float> m_x, m_y, m_z, m_t;
++
+     static thread_local OMSimTrackingAction* instance;  ///< Thread-local instance pointer
+ };
+diff --git a/simulations/wavepid/include/ROOTHitManager.hh b/simulations/wavepid/include/ROOTHitManager.hh
+index 5732b50b..a4e3da61 100644
+--- a/simulations/wavepid/include/ROOTHitManager.hh
++++ b/simulations/wavepid/include/ROOTHitManager.hh
+@@ -6,6 +6,7 @@
+ 
+ #include "TFile.h"
+ #include "TTree.h"
++#include <mutex>
+ #include "G4Types.hh"
+ #include "G4ThreeVector.hh"
+ #include "TString.h"
+@@ -23,6 +24,7 @@ struct PhotonInfoROOT {
+     Double_t generationDetectionDistance;
+     Double_t energy;
+     Int_t    PMTnr;
++    Int_t    moduleID;      ///< optical module index (--dom_layout), 1-based as in /DOM/<k>
+     Double_t dir_x;
+     Double_t dir_y;
+     Double_t dir_z;
+@@ -65,9 +67,31 @@ public:
+      * @param info PhotonInfoROOT structure containing hit data.
+      */
+     void FillPhotonInfo(const PhotonInfoROOT& info);
++    /// One row per simulated event (also events with zero hits): primary energy in GeV and type.
++    /// vertexM: primary vertex [m], nuDir: neutrino (event-frame +x) direction after --random_rotation.
++    void FillEvent(int eventID, double energyGeV, const std::string& particle,
++                   const double vertexM[3], const double nuDir[3]);
++    /// One row per recorded track (--photon_tracks): step points in mm / ns, first point = vertex.
++    /// energy is the kinetic energy at creation in MeV; for optical photons wavelength is in nm.
++    void FillTrack(int eventID, int trackID, int parentID, const std::string& particle,
++                   const std::string& creator, double energyMeV, double wavelengthNm, int detected,
++                   const std::vector<float>& x, const std::vector<float>& y,
++                   const std::vector<float>& z, const std::vector<float>& t);
+ 
+ private:
+     TFile* m_file;
+     TTree* m_tree;
++    std::mutex m_fillMutex; ///< one TTree is shared by all worker threads; Fill() is not thread-safe
+     PhotonInfoROOT m_photonInfo;
++    TTree*   m_eventTree = nullptr;
++    long     m_eventsFilled = 0;     ///< for the periodic AutoSave (recoverable file if the job is killed)
++    Int_t    m_evID = 0;
++    Double_t m_evEnergy = 0;
++    TString  m_evParticle;
++    Double_t m_evVx = 0, m_evVy = 0, m_evVz = 0, m_evNx = 1, m_evNy = 0, m_evNz = 0;
++    TTree*   m_trackTree = nullptr;
++    Int_t    m_trEvent = 0, m_trID = 0, m_trParent = 0, m_trDetected = 0;
++    TString  m_trParticle, m_trCreator;
++    Double_t m_trEnergy = 0, m_trWavelength = 0;
++    std::vector<float> m_trX, m_trY, m_trZ, m_trT;
+ };
+diff --git a/simulations/wavepid/src/OMSimActionInitialization.cc b/simulations/wavepid/src/OMSimActionInitialization.cc
+index 48867d86..58064b53 100644
+--- a/simulations/wavepid/src/OMSimActionInitialization.cc
++++ b/simulations/wavepid/src/OMSimActionInitialization.cc
+@@ -8,6 +8,7 @@
+ #include "OMSimEventAction.hh"
+ #include "OMSimTrackingAction.hh"
+ #include "OMSimSteppingAction.hh"
++#include "OMSimStackingAction.hh"
+ #include <G4RandomTools.hh>
+ 
+ OMSimActionInitialization::OMSimActionInitialization()
+@@ -31,4 +32,5 @@ void OMSimActionInitialization::Build() const
+     SetUserAction(new OMSimEventAction);
+     SetUserAction(new OMSimTrackingAction);
+     SetUserAction(new OMSimSteppingAction);
++    SetUserAction(new OMSimStackingAction);
+ }
+diff --git a/simulations/wavepid/src/OMSimEventAction.cc b/simulations/wavepid/src/OMSimEventAction.cc
+index c0a7ac1a..5716a86a 100644
+--- a/simulations/wavepid/src/OMSimEventAction.cc
++++ b/simulations/wavepid/src/OMSimEventAction.cc
+@@ -4,11 +4,57 @@
+  */
+ #include "OMSimEventAction.hh"
+ #include <G4RunManager.hh>
++#include <G4Event.hh>
++#include <G4PrimaryVertex.hh>
++#include <G4PrimaryParticle.hh>
++#include <G4ParticleDefinition.hh>
++#include <G4SystemOfUnits.hh>
++#include "OMSimHitManager.hh"
++#include "OMSimTrackingAction.hh"
++#include "OMSimPrimaryGeneratorAction.hh"
++#include "OMSimLogger.hh"
++#include <atomic>
++#include <chrono>
++
++namespace {
++    // progress report every 10 finished events (all worker threads together): count, wall time, seconds per event
++    std::atomic<long> g_eventsDone{0};
++    const auto g_start = std::chrono::steady_clock::now();
++}
+ 
+ void OMSimEventAction::BeginOfEventAction(const G4Event* p_event)
+ {
++    // drop the previous event's track bookkeeping (thread-local singleton)
++    if (OMSimTrackingAction::HasInstance()) {
++        OMSimTrackingAction::GetInstance().Reset();
++    }
+ }
+ 
+ void OMSimEventAction::EndOfEventAction(const G4Event* p_event)
+ {
++    // Store primary energy/type for every event so that zero-hit events are
++    // still accounted for in the per-event bookkeeping (needed for benchmarks).
++    // Energy = sum of kinetic energies of all primaries (several per event with
++    // --event_file); particle = the single primary's name, or "multi(N)".
++    G4double totalKinetic = 0.0; int nPrimaries = 0; std::string name;
++    for (int iv = 0; iv < p_event->GetNumberOfPrimaryVertex(); ++iv) {
++        const G4PrimaryVertex* vertex = p_event->GetPrimaryVertex(iv);
++        for (const G4PrimaryParticle* primary = vertex->GetPrimary(); primary; primary = primary->GetNext()) {
++            totalKinetic += primary->GetKineticEnergy();
++            name = primary->GetParticleDefinition()->GetParticleName();
++            ++nPrimaries;
++        }
++    }
++    if (nPrimaries > 0) {
++        const G4ThreeVector vertexM = p_event->GetPrimaryVertex(0)->GetPosition() / m;
++        OMSimHitManager::getInstance().recordEvent(
++            p_event->GetEventID(), totalKinetic / GeV,
++            nPrimaries == 1 ? name : "multi(" + std::to_string(nPrimaries) + ")",
++            vertexM, OMSimPrimaryGeneratorAction::lastNuDirection());
++    }
++    const long done = ++g_eventsDone;
++    if (done % 10 == 0) {
++        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_start).count();
++        log_info("progress: {} events done in {:.0f} s ({:.1f} s/event wall, this run)", done, secs, secs / done);
++    }
+ }
+diff --git a/simulations/wavepid/src/OMSimHitManager.cc b/simulations/wavepid/src/OMSimHitManager.cc
+index 49d2a484..14133de5 100644
+--- a/simulations/wavepid/src/OMSimHitManager.cc
++++ b/simulations/wavepid/src/OMSimHitManager.cc
+@@ -85,7 +85,7 @@ void OMSimHitManager::appendHitInfo(
+     G4ThreeVector pMomentumDirection,
+     G4ThreeVector pGlobalPos,
+     G4ThreeVector pLocalPos,
+-    G4double p_distance,
++    G4ThreeVector p_delta,
+     OMSimPMTResponse::PMTPulse pResponse,
+     G4String pPhotonOrigin,
+     G4int pParentID,
+@@ -96,6 +96,7 @@ void OMSimHitManager::appendHitInfo(
+ {
+     // Option to cache hits in memory (disabled by default for memory efficiency)
+     static constexpr bool kCacheHitsInMemory = false;
++    const G4double p_distance = p_delta.mag();
+ 
+     if (!m_threadData) {
+         log_debug("Initialized m_threadData for thread {}", G4Threading::G4GetThreadId());
+@@ -140,6 +141,7 @@ void OMSimHitManager::appendHitInfo(
+     info.generationDetectionDistance = p_distance;
+     info.energy = p_energy;
+     info.PMTnr = pPMTHitNumber;
++    info.moduleID = pModuleIndex;
+     info.dir_x = pMomentumDirection.x();
+     info.dir_y = pMomentumDirection.y();
+     info.dir_z = pMomentumDirection.z();
+@@ -149,9 +151,10 @@ void OMSimHitManager::appendHitInfo(
+     info.globalPos_x = pGlobalPos.x();
+     info.globalPos_y = pGlobalPos.y();
+     info.globalPos_z = pGlobalPos.z();
+-    info.deltaPos_x = p_distance;
+-    info.deltaPos_y = 0;
+-    info.deltaPos_z = 0;
++    // vector from the hit point to the photon's creation point: emission = globalPos + deltaPos
++    info.deltaPos_x = p_delta.x();
++    info.deltaPos_y = p_delta.y();
++    info.deltaPos_z = p_delta.z();
+     info.wavelength = p_wavelength;
+     info.parentID = pParentID;
+     info.parentType = pParentType;
+@@ -167,6 +170,27 @@ void OMSimHitManager::appendHitInfo(
+     }
+ }
+ 
++void OMSimHitManager::recordEvent(G4int p_eventid, G4double p_energyGeV, const std::string& p_particle,
++                                  const G4ThreeVector& p_vertexM, const G4ThreeVector& p_nuDir)
++{
++    if (m_rootManager) {
++        const double v[3] = {p_vertexM.x(), p_vertexM.y(), p_vertexM.z()};
++        const double d[3] = {p_nuDir.x(), p_nuDir.y(), p_nuDir.z()};
++        m_rootManager->FillEvent(p_eventid, p_energyGeV, p_particle, v, d);
++    }
++}
++
++void OMSimHitManager::recordTrack(G4int p_eventid, G4int p_trackID, G4int p_parentID, const std::string& p_particle,
++                                  const std::string& p_creator, G4double p_energyMeV, G4double p_wavelengthNm, G4int p_detected,
++                                  const std::vector<float>& x, const std::vector<float>& y,
++                                  const std::vector<float>& z, const std::vector<float>& t)
++{
++    if (m_rootManager) {
++        m_rootManager->FillTrack(p_eventid, p_trackID, p_parentID, p_particle, p_creator,
++                                 p_energyMeV, p_wavelengthNm, p_detected, x, y, z, t);
++    }
++}
++
+ void OMSimHitManager::setNumberOfPMTs(int pNumberOfPMTs, int pModuleIndex)
+ {
+     log_trace("Setting {} PMTs for module {}", pNumberOfPMTs, pModuleIndex);
+diff --git a/simulations/wavepid/src/OMSimPhysicsList.cc b/simulations/wavepid/src/OMSimPhysicsList.cc
+index f8e7f7e4..cdee8cf6 100644
+--- a/simulations/wavepid/src/OMSimPhysicsList.cc
++++ b/simulations/wavepid/src/OMSimPhysicsList.cc
+@@ -4,6 +4,24 @@
+  */
+ #include "OMSimPhysicsList.hh"
+ #include "OMSimOpBoundaryProcess.hh"
++#include "OMSimCommandArgsTable.hh"
++#include "OMSimLogger.hh"
++// hadronic option
++#include <G4MesonConstructor.hh>
++#include <G4BaryonConstructor.hh>
++#include <G4IonConstructor.hh>
++#include <G4ShortLivedConstructor.hh>
++#include <G4DecayPhysics.hh>
++#include <G4HadronElasticPhysics.hh>
++#include <G4HadronPhysicsFTFP_BERT.hh>
++#include <G4StoppingPhysics.hh>
++#include <G4IonPhysics.hh>
++#include <G4hMultipleScattering.hh>
++#include <G4hIonisation.hh>
++#include <G4hBremsstrahlung.hh>
++#include <G4hPairProduction.hh>
++#include <G4ionIonisation.hh>
++#include <G4NuclearStopping.hh>
+ 
+ #include <G4ProcessManager.hh>
+ #include <G4ParticleTypes.hh>
+@@ -43,6 +61,20 @@
+ 
+ OMSimPhysicsList::OMSimPhysicsList() : G4VUserPhysicsList()
+ {
++    try {
++        m_hadronic = OMSimCommandArgsTable::getInstance().get<bool>("hadronic");
++    } catch (...) {
++        m_hadronic = false;
++    }
++    if (m_hadronic) {
++        log_info("Hadronic physics enabled (FTFP_BERT + elastic + decay + stopping + ion)");
++        m_hadronicConstructors = {
++            new G4DecayPhysics(0),
++            new G4HadronElasticPhysics(0),
++            new G4HadronPhysicsFTFP_BERT(0),
++            new G4StoppingPhysics(0),
++            new G4IonPhysics(0)};
++    }
+     defaultCutValue = 0.1 * mm;
+     SetVerboseLevel(0);
+ }
+@@ -69,6 +101,14 @@ void OMSimPhysicsList::ConstructParticle()
+ 
+     // Proton (sometimes needed for interactions)
+     G4Proton::ProtonDefinition();
++
++    if (m_hadronic) {
++        G4MesonConstructor().ConstructParticle();
++        G4BaryonConstructor().ConstructParticle();
++        G4IonConstructor().ConstructParticle();
++        G4ShortLivedConstructor().ConstructParticle();
++        for (auto* c : m_hadronicConstructors) c->ConstructParticle();
++    }
+ }
+ 
+ void OMSimPhysicsList::ConstructProcess()
+@@ -77,7 +117,15 @@ void OMSimPhysicsList::ConstructProcess()
+ 
+     // Cerenkov process - key for WavePID
+     G4Cerenkov* theCerenkovProcess = new G4Cerenkov("Cerenkov");
+-    theCerenkovProcess->SetTrackSecondariesFirst(true);
++    // NOTE: with SetTrackSecondariesFirst(true) the parent track is suspended after
++    // every Cherenkov-producing step; on resume G4HadronicProcess::StartTracking
++    // resets its interaction length and hadron primaries effectively never undergo
++    // inelastic interactions (verified: 10 GeV pi- crossed 13 m of ice without
++    // showering). It has no effect on physics otherwise, so default to false and
++    // let --track_secondaries_first restore the original behaviour.
++    bool secondariesFirst = false;
++    try { secondariesFirst = OMSimCommandArgsTable::getInstance().get<bool>("track_secondaries_first"); } catch (...) {}
++    theCerenkovProcess->SetTrackSecondariesFirst(secondariesFirst);
+     theCerenkovProcess->SetMaxBetaChangePerStep(10.0);
+     theCerenkovProcess->SetMaxNumPhotonsPerStep(100);
+     theCerenkovProcess->SetVerboseLevel(0);
+@@ -159,6 +207,42 @@ void OMSimPhysicsList::ConstructProcess()
+             pmanager->SetProcessOrdering(theCerenkovProcess, idxPostStep);
+         }
+     }
++
++    if (m_hadronic) {
++        addHadronEMProcesses();
++        for (auto* c : m_hadronicConstructors) c->ConstructProcess();
++    }
++}
++
++/**
++ * @brief Ionisation and multiple scattering for charged hadrons and ions.
++ * Leptons, gammas and optical photons keep the hand-tuned processes above.
++ */
++void OMSimPhysicsList::addHadronEMProcesses()
++{
++    auto it = GetParticleIterator();
++    it->reset();
++    while ((*it)()) {
++        G4ParticleDefinition* particle = it->value();
++        const G4String& name = particle->GetParticleName();
++        if (particle->GetPDGCharge() == 0.0 || particle->IsShortLived()) continue;
++        if (name == "e-" || name == "e+" || name == "mu-" || name == "mu+") continue;
++        G4ProcessManager* pm = particle->GetProcessManager();
++        if (name == "GenericIon" || name == "alpha" || name == "He3" ||
++            name == "deuteron" || name == "triton") {
++            pm->AddProcess(new G4hMultipleScattering(), -1, 1, 1);
++            pm->AddProcess(new G4ionIonisation(), -1, 2, 2);
++            pm->AddProcess(new G4NuclearStopping(), -1, 3, -1);
++        } else {
++            pm->AddProcess(new G4hMultipleScattering(), -1, 1, 1);
++            pm->AddProcess(new G4hIonisation(), -1, 2, 2);
++            if (name == "pi+" || name == "pi-" || name == "kaon+" || name == "kaon-" ||
++                name == "proton" || name == "anti_proton") {
++                pm->AddProcess(new G4hBremsstrahlung(), -1, -1, 3);
++                pm->AddProcess(new G4hPairProduction(), -1, -1, 4);
++            }
++        }
++    }
+ }
+ 
+ void OMSimPhysicsList::SetCuts()
+diff --git a/simulations/wavepid/src/OMSimPrimaryGeneratorAction.cc b/simulations/wavepid/src/OMSimPrimaryGeneratorAction.cc
+index 8c61ccbb..6373f518 100644
+--- a/simulations/wavepid/src/OMSimPrimaryGeneratorAction.cc
++++ b/simulations/wavepid/src/OMSimPrimaryGeneratorAction.cc
+@@ -25,16 +25,45 @@
+ #include <G4ParticleDefinition.hh>
+ #include <G4SystemOfUnits.hh>
+ #include <G4RandomTools.hh>
++#include <G4RotationMatrix.hh>
++#include <G4PhysicalConstants.hh>
++#include <G4Event.hh>
++#include <G4PrimaryVertex.hh>
++#include <G4PrimaryParticle.hh>
++#include <fstream>
++#include <sstream>
+ 
+ thread_local std::unique_ptr<G4ParticleGun> OMSimPrimaryGeneratorAction::m_particleGun;
+ thread_local std::unique_ptr<G4GeneralParticleSource> OMSimPrimaryGeneratorAction::m_particleSource;
+ G4Mutex OMSimPrimaryGeneratorAction::m_mutex;
++std::vector<std::vector<OMSimPrimaryGeneratorAction::FinalStateParticle>> OMSimPrimaryGeneratorAction::m_events;
++bool OMSimPrimaryGeneratorAction::m_eventsLoaded = false;
++thread_local G4ThreeVector OMSimPrimaryGeneratorAction::s_lastNuDir(1, 0, 0);
+ 
+ OMSimPrimaryGeneratorAction::OMSimPrimaryGeneratorAction()
+     : m_useParticleGun(true)
+ {
+     OMSimCommandArgsTable& args = OMSimCommandArgsTable::getInstance();
+ 
++    // Pre-generated final states (e.g. from GENIE / NuGen MC): all particles of an
++    // event start together at the standard vertex, moving in the neutrino frame
++    // where the neutrino direction is +x. Overrides -p/-e; keeps -d for the vertex.
++    std::string eventFile;
++    try { eventFile = args.get<std::string>("event_file"); } catch (...) {}
++    if (!eventFile.empty()) {
++        m_useEventFile = true;
++        m_useParticleGun = false;
++        G4double impactParameter = args.get<G4double>("impact_parameter");
++        m_position = G4ThreeVector(-1.7 * impactParameter * m, 0.0, impactParameter * m);
++        try { m_randomVertexM = args.get<G4double>("random_vertex"); } catch (...) {}
++        try { m_randomRotation = args.get<bool>("random_rotation"); } catch (...) {}
++        if (m_randomVertexM > 0 || m_randomRotation)
++            log_info("event file: random vertex in [-{}, {}]^3 m = {}, random rotation = {}",
++                     m_randomVertexM, m_randomVertexM, m_randomVertexM > 0, m_randomRotation);
++        loadEventFile(eventFile);
++        return;
++    }
++
+     // Check if a macro file is specified - if so, use GPS for flexibility
+     std::string macroFile = args.get<std::string>("macro");
+     if (!macroFile.empty()) {
+@@ -96,11 +125,85 @@ OMSimPrimaryGeneratorAction::~OMSimPrimaryGeneratorAction()
+ {
+ }
+ 
++void OMSimPrimaryGeneratorAction::loadEventFile(const std::string& path)
++{
++    std::lock_guard<G4Mutex> lock(m_mutex);
++    if (m_eventsLoaded) return;
++    std::ifstream in(path);
++    if (!in) {
++        log_error("Cannot open event file {}", path);
++        throw std::runtime_error("cannot open --event_file " + path);
++    }
++    // format: one particle per line  "<event index> <G4 particle name> <kinetic E [GeV]> <dx> <dy> <dz>"
++    // lines starting with # are comments; event indices must be 0..N-1 (gaps allowed = empty events)
++    std::string line; long maxIndex = -1;
++    std::vector<std::pair<long, FinalStateParticle>> rows;
++    while (std::getline(in, line)) {
++        if (line.empty() || line[0] == '#') continue;
++        std::istringstream ss(line);
++        long idx; FinalStateParticle fp; double dx, dy, dz;
++        if (!(ss >> idx >> fp.name >> fp.kineticEnergyGeV >> dx >> dy >> dz)) continue;
++        fp.direction = G4ThreeVector(dx, dy, dz).unit();
++        rows.emplace_back(idx, fp);
++        maxIndex = std::max(maxIndex, idx);
++    }
++    m_events.assign(maxIndex + 1, {});
++    for (auto& r : rows) m_events[r.first].push_back(r.second);
++    m_eventsLoaded = true;
++    log_info("Event file {}: {} events, {} particles; vertex at ({}, {}, {}) m",
++             path, m_events.size(), rows.size(), m_position.x() / m, m_position.y() / m, m_position.z() / m);
++}
++
++void OMSimPrimaryGeneratorAction::generateFromEventFile(G4Event* p_event)
++{
++    if (m_events.empty()) return;
++    const std::size_t idx = static_cast<std::size_t>(p_event->GetEventID()) % m_events.size();
++    if (static_cast<std::size_t>(p_event->GetEventID()) >= m_events.size() && idx == 0)
++        log_warning("More Geant4 events than entries in the event file: wrapping around");
++    // --random_vertex: uniform in a cube around the origin; --random_rotation: uniform rotation of
++    // the whole final state (new x-axis isotropic, then a uniform spin about it), applied to every
++    // particle direction so the event keeps its internal kinematics.
++    G4ThreeVector position = m_position;
++    if (m_randomVertexM > 0)
++        position = G4ThreeVector(2 * G4UniformRand() - 1, 2 * G4UniformRand() - 1, 2 * G4UniformRand() - 1) * m_randomVertexM * m;
++    G4RotationMatrix rot;
++    if (m_randomRotation) {
++        const G4ThreeVector axisX = G4RandomDirection();
++        const G4ThreeVector ex(1, 0, 0);
++        G4ThreeVector pivot = ex.cross(axisX);
++        if (pivot.mag2() > 1e-12) rot.rotate(std::acos(std::max(-1.0, std::min(1.0, ex.dot(axisX)))), pivot.unit());
++        else if (axisX.x() < 0) rot.rotateZ(CLHEP::pi);
++        rot = G4RotationMatrix(axisX, CLHEP::twopi * G4UniformRand()) * rot;
++    }
++    s_lastNuDir = rot * G4ThreeVector(1, 0, 0);
++    auto* vertex = new G4PrimaryVertex(position, 0.0);
++    G4ParticleTable* table = G4ParticleTable::GetParticleTable();
++    int added = 0;
++    for (const auto& fp : m_events[idx]) {
++        G4ParticleDefinition* def = table->FindParticle(fp.name);
++        if (!def) { log_warning("Event {}: unknown particle '{}' skipped (need --hadronic?)", idx, fp.name); continue; }
++        auto* primary = new G4PrimaryParticle(def);
++        primary->SetKineticEnergy(fp.kineticEnergyGeV * GeV);
++        primary->SetMomentumDirection(rot * fp.direction);
++        vertex->SetPrimary(primary);
++        ++added;
++    }
++    if (added == 0) {   // keep the event count in step with the file: shoot a harmless placeholder
++        auto* primary = new G4PrimaryParticle(table->FindParticle("geantino"));
++        primary->SetKineticEnergy(1 * MeV);
++        primary->SetMomentumDirection(G4ThreeVector(1, 0, 0));
++        vertex->SetPrimary(primary);
++    }
++    p_event->AddPrimaryVertex(vertex);
++}
++
+ void OMSimPrimaryGeneratorAction::GeneratePrimaries(G4Event* p_event)
+ {
+     std::lock_guard<G4Mutex> lock(m_mutex);
+ 
+-    if (m_useParticleGun && m_particleGun) {
++    if (m_useEventFile) {
++        generateFromEventFile(p_event);
++    } else if (m_useParticleGun && m_particleGun) {
+         m_particleGun->GeneratePrimaryVertex(p_event);
+     } else if (m_particleSource) {
+         m_particleSource->SetParticlePolarization(G4RandomDirection());
+diff --git a/simulations/wavepid/src/OMSimSensitiveDetector.cc b/simulations/wavepid/src/OMSimSensitiveDetector.cc
+index 85c586ab..18f8dc49 100644
+--- a/simulations/wavepid/src/OMSimSensitiveDetector.cc
++++ b/simulations/wavepid/src/OMSimSensitiveDetector.cc
+@@ -24,6 +24,7 @@
+ #include "G4EventManager.hh"
+ #include "OMSimOpBoundaryProcess.hh"
+ #include "G4SystemOfUnits.hh"
++#include <atomic>
+ 
+ thread_local G4OpBoundaryProcess* OMSimSensitiveDetector::m_boundaryProcess = nullptr;
+ 
+@@ -33,6 +34,8 @@ OMSimSensitiveDetector::OMSimSensitiveDetector(G4String pName, DetectorType pDet
+       m_PMTResponse(nullptr),
+       m_QEcut(OMSimCommandArgsTable::getInstance().get<bool>("efficiency_cut"))
+ {
++    try { m_photonFraction = OMSimCommandArgsTable::getInstance().get<G4double>("photon_fraction"); } catch (...) {}
++    try { m_qeScale = OMSimCommandArgsTable::getInstance().get<G4double>("qe_scale"); } catch (...) {}
+ }
+ 
+ OMSimSensitiveDetector::~OMSimSensitiveDetector()
+@@ -180,7 +183,11 @@ PhotonInfo OMSimSensitiveDetector::getPhotonInfo(G4Step* pStep)
+     info.deltaPosition = track->GetVertexPosition() - info.globalPosition;
+ 
+     info.pmtNumber = 0;
+-    info.detectorID = std::atoi(SensitiveDetectorName);
++    {   // module index = trailing number of the detector name ("/DOM/3" -> 3); atoi on the whole name gave 0
++        const std::string n = SensitiveDetectorName;
++        const auto slash = n.find_last_of('/');
++        info.detectorID = std::atoi(n.substr(slash == std::string::npos ? 0 : slash + 1).c_str());
++    }
+ 
+     // PMT response
+     if (m_PMTResponse) {
+@@ -263,6 +270,18 @@ G4bool OMSimSensitiveDetector::handlePMT(G4Step* pStep, G4TouchableHistory* pTou
+ {
+     PhotonInfo info = getPhotonInfo(pStep);
+ 
++    if (m_qeScale != 1.0)                                          // --qe_scale: HQE PMT relative to the modelled DOM
++        info.PMTResponse.detectionProbability *= m_qeScale;
++    if (m_photonFraction < 1.0)                                    // undo the --photon_fraction thinning applied at creation
++        info.PMTResponse.detectionProbability /= m_photonFraction;
++    if (info.PMTResponse.detectionProbability > 1.0) {
++        static std::atomic<bool> warned{false};
++        if (!warned.exchange(true))
++            log_warning("QE x CE x qe_scale / photon_fraction > 1 for some photons: increase --photon_fraction or lower "
++                        "--qe_scale (clamped to 1, hits are biased low)");
++        info.PMTResponse.detectionProbability = 1.0;
++    }
++
+     if (m_QEcut && !isPhotonDetected(info.PMTResponse.detectionProbability))
+         return false;
+     else if (m_QEcut)
+@@ -302,6 +321,8 @@ G4bool OMSimSensitiveDetector::handleShellDetector(G4Step* pStep, G4TouchableHis
+ 
+ void OMSimSensitiveDetector::storePhotonHit(PhotonInfo& pInfo)
+ {
++    // let the tracking action know this photon's path ends in a detection (--photon_tracks)
++    if (OMSimTrackingAction::HasInstance()) OMSimTrackingAction::GetInstance().MarkDetected();
+     OMSimHitManager& hitManager = OMSimHitManager::getInstance();
+     hitManager.appendHitInfo(
+         pInfo.eventID,
+@@ -314,7 +335,7 @@ void OMSimSensitiveDetector::storePhotonHit(PhotonInfo& pInfo)
+         pInfo.momentumDirection,
+         pInfo.globalPosition,
+         pInfo.localPosition,
+-        pInfo.deltaPosition.mag(),
++        pInfo.deltaPosition,
+         pInfo.PMTResponse,
+         pInfo.photonOrigin,
+         pInfo.parentID,
+diff --git a/simulations/wavepid/src/OMSimStackingAction.cc b/simulations/wavepid/src/OMSimStackingAction.cc
+new file mode 100644
+index 00000000..301bc2fa
+--- /dev/null
++++ b/simulations/wavepid/src/OMSimStackingAction.cc
+@@ -0,0 +1,22 @@
++#include "OMSimStackingAction.hh"
++#include <G4Track.hh>
++#include <G4OpticalPhoton.hh>
++#include <Randomize.hh>
++#include "OMSimCommandArgsTable.hh"
++
++OMSimStackingAction::OMSimStackingAction()
++{
++    try { m_photonFraction = OMSimCommandArgsTable::getInstance().get<G4double>("photon_fraction"); } catch (...) {}
++}
++
++G4ClassificationOfNewTrack OMSimStackingAction::ClassifyNewTrack(const G4Track* track)
++{
++    if (track->GetDefinition() == G4OpticalPhoton::Definition()) {
++        // --photon_fraction F < 1: keep a random fraction F of the Cherenkov photons at creation, kill the rest.
++        // OMSimSensitiveDetector divides the detection probability by F, so the detected hits are statistically
++        // identical to the full simulation as long as QE x CE <= F (a two-stage Bernoulli thinning), at 1/F the cost.
++        if (m_photonFraction < 1.0 && G4UniformRand() >= m_photonFraction) return fKill;
++        return fUrgent;
++    }
++    return fWaiting;
++}
+diff --git a/simulations/wavepid/src/OMSimSteppingAction.cc b/simulations/wavepid/src/OMSimSteppingAction.cc
+new file mode 100644
+index 00000000..cbb9377b
+--- /dev/null
++++ b/simulations/wavepid/src/OMSimSteppingAction.cc
+@@ -0,0 +1,61 @@
++/**
++ * @file OMSimSteppingAction.cc (WavePID copy)
++ * @brief Stuck-particle guard from the common framework plus an optional
++ * optical-photon kill for photons that can no longer reach the module.
++ */
++#include "OMSimSteppingAction.hh"
++#include "OMSimTrackingAction.hh"
++#include "OMSimCommandArgsTable.hh"
++#include "OMSimLogger.hh"
++#include <G4Step.hh>
++#include <G4Track.hh>
++#include <G4OpticalPhoton.hh>
++#include <G4SystemOfUnits.hh>
++
++namespace {
++G4double killDistance()
++{
++    static G4ThreadLocal G4double s_kill = -1.0;
++    if (s_kill < 0) {
++        s_kill = 0.0;
++        try { s_kill = OMSimCommandArgsTable::getInstance().get<G4double>("photon_kill_distance") * m; } catch (...) {}
++    }
++    return s_kill;
++}
++}
++
++void OMSimSteppingAction::UserSteppingAction(const G4Step* p_step)
++{
++    G4Track* track = p_step->GetTrack();
++
++    // kill particles that are stuck, e.g. looping inside the pressure vessel
++    if (track->GetCurrentStepNumber() > 100000) {
++        log_info("Particle {} with energy {} eV stuck, will be killed!",
++                 track->GetDefinition()->GetParticleName(), 1239.84193 / (track->GetKineticEnergy() / eV));
++        if (track->GetTrackStatus() != fStopAndKill) track->SetTrackStatus(fStopAndKill);
++        return;
++    }
++
++    // Optical photons that are already far from the module (at the origin) and
++    // receding from it cannot be detected any more (ice scattering is strongly
++    // forward-peaked, and a back-scatter at that distance would arrive far outside
++    // any analysis window). Killing them saves most of the tracking time at large
++    // impact parameters.
++    const G4double kill = killDistance();
++    if (kill > 0.0 && track->GetDefinition() == G4OpticalPhoton::Definition()) {
++        const G4ThreeVector& pos = track->GetPosition();
++        if (pos.mag2() > kill * kill && pos.dot(track->GetMomentumDirection()) > 0.0) {
++            track->SetTrackStatus(fStopAndKill);
++        }
++    }
++
++    // --photon_tracks: append the post-step point of the current track (after the kill
++    // checks, so a killed photon keeps its last position)
++    if (OMSimTrackingAction::HasInstance()) {
++        OMSimTrackingAction& ta = OMSimTrackingAction::GetInstance();
++        if (ta.RecordingEnabled()) {
++            const G4StepPoint* post = p_step->GetPostStepPoint();
++            ta.AddStep(post->GetPosition(), post->GetGlobalTime());
++        }
++    }
++}
+diff --git a/simulations/wavepid/src/OMSimTrackingAction.cc b/simulations/wavepid/src/OMSimTrackingAction.cc
+index 26f4dcb8..83ef6c00 100644
+--- a/simulations/wavepid/src/OMSimTrackingAction.cc
++++ b/simulations/wavepid/src/OMSimTrackingAction.cc
+@@ -3,10 +3,16 @@
+  * @brief Implementation of enhanced tracking action for WavePID.
+  */
+ #include "OMSimTrackingAction.hh"
++#include "OMSimHitManager.hh"
++#include "OMSimCommandArgsTable.hh"
+ #include "G4ParticleDefinition.hh"
+ #include "G4VProcess.hh"
+ #include "G4OpticalPhoton.hh"
+ #include "G4SystemOfUnits.hh"
++#include "G4PhysicalConstants.hh"
++#include "G4EventManager.hh"
++#include "G4Event.hh"
++#include "Randomize.hh"
+ #include <stdexcept>
+ 
+ // Thread-local instance pointer — each Geant4 worker thread gets its own instance
+@@ -29,6 +35,8 @@ OMSimTrackingAction::OMSimTrackingAction()
+         throw std::runtime_error("OMSimTrackingAction is a singleton - only one instance allowed!");
+     }
+     instance = this;
++    try { m_trackFraction = OMSimCommandArgsTable::getInstance().get<G4double>("photon_tracks"); } catch (...) {}
++    try { m_chargedFraction = OMSimCommandArgsTable::getInstance().get<G4double>("charged_tracks"); } catch (...) {}
+ }
+ 
+ OMSimTrackingAction::~OMSimTrackingAction()
+@@ -36,8 +44,37 @@ OMSimTrackingAction::~OMSimTrackingAction()
+     instance = nullptr;
+ }
+ 
++void OMSimTrackingAction::AddStep(const G4ThreeVector& pos, G4double time)
++{
++    if (!m_bufferActive) return;
++    m_x.push_back(static_cast<float>(pos.x() / mm));
++    m_y.push_back(static_cast<float>(pos.y() / mm));
++    m_z.push_back(static_cast<float>(pos.z() / mm));
++    m_t.push_back(static_cast<float>(time / ns));
++}
++
+ void OMSimTrackingAction::PreUserTrackingAction(const G4Track* track)
+ {
++    const bool isPhoton = track->GetDefinition() == G4OpticalPhoton::Definition();
++
++    if (RecordingEnabled()) {
++        // Start the step buffer at the creation point. Photons not picked by the
++        // fraction are buffered too (one track at a time, so this is cheap) because a
++        // photon only reveals in the photocathode that it must be kept.
++        m_recordCurrent = isPhoton ? (G4UniformRand() < m_trackFraction)
++                                   : (m_chargedFraction >= 1.0 || G4UniformRand() < m_chargedFraction);
++        m_detectedCurrent = false;
++        m_bufferActive = true;
++        m_x.clear(); m_y.clear(); m_z.clear(); m_t.clear();
++        AddStep(track->GetVertexPosition(), track->GetGlobalTime());
++    }
++
++    // Optical photons are never the parent of a detected photon, so they need no
++    // bookkeeping. Storing them (millions per event) was ~1 GB per 30 GeV event.
++    if (isPhoton) {
++        return;
++    }
++
+     G4int trackID = track->GetTrackID();
+     std::string particleName = track->GetDefinition()->GetParticleName();
+ 
+@@ -46,11 +83,9 @@ void OMSimTrackingAction::PreUserTrackingAction(const G4Track* track)
+ 
+     // Optional: Energy cut for non-optical particles to improve performance
+     // Kills low-energy particles that won't produce detectable Cerenkov light
+-    if (track->GetDefinition() != G4OpticalPhoton::Definition()) {
+-        if (track->GetKineticEnergy() < 990 * keV) {
+-            const_cast<G4Track*>(track)->SetTrackStatus(fStopAndKill);
+-            return;
+-        }
++    if (track->GetKineticEnergy() < 990 * keV) {
++        const_cast<G4Track*>(track)->SetTrackStatus(fStopAndKill);
++        return;
+     }
+ 
+     // Store creator process
+@@ -62,10 +97,30 @@ void OMSimTrackingAction::PreUserTrackingAction(const G4Track* track)
+     }
+ }
+ 
+-void OMSimTrackingAction::PostUserTrackingAction(const G4Track* /*track*/)
++void OMSimTrackingAction::Reset()
++{
++    m_trackIDToParticleTypeMap.clear();
++    m_trackIDToCreatorProcessMap.clear();
++}
++
++void OMSimTrackingAction::PostUserTrackingAction(const G4Track* track)
+ {
+-    // Optional: Could clean up maps here for completed tracks
+-    // Currently keeping data for potential later analysis
++    if (!m_bufferActive) return;
++    m_bufferActive = false;
++    if (!(m_recordCurrent || m_detectedCurrent)) return;
++    // tracks killed before their first step (the 990 keV cut above) have only the vertex
++    if (m_x.size() < 2 && !m_detectedCurrent) return;
++
++    const bool isPhoton = track->GetDefinition() == G4OpticalPhoton::Definition();
++    const G4VProcess* creator = track->GetCreatorProcess();
++    const G4Event* event = G4EventManager::GetEventManager()->GetConstCurrentEvent();
++    // vertex kinetic energy: for photons the wavelength in nm, for the rest MeV at creation
++    const G4double eVertex = track->GetVertexKineticEnergy();
++    const G4double wavelength = (isPhoton && eVertex > 0) ? (h_Planck * c_light / eVertex) / nm : 0.0;
++    OMSimHitManager::getInstance().recordTrack(
++        event ? event->GetEventID() : -1, track->GetTrackID(), track->GetParentID(),
++        track->GetDefinition()->GetParticleName(), creator ? creator->GetProcessName() : "Primary",
++        eVertex / MeV, wavelength, m_detectedCurrent ? 1 : 0, m_x, m_y, m_z, m_t);
+ }
+ 
+ std::string OMSimTrackingAction::GetParticleType(G4int trackID) const
+diff --git a/simulations/wavepid/src/OMSimWavePIDDetector.cc b/simulations/wavepid/src/OMSimWavePIDDetector.cc
+index 14b0b249..5ca45018 100644
+--- a/simulations/wavepid/src/OMSimWavePIDDetector.cc
++++ b/simulations/wavepid/src/OMSimWavePIDDetector.cc
+@@ -18,6 +18,8 @@
+ #include <G4VisAttributes.hh>
+ #include <G4SystemOfUnits.hh>
+ #include <CLHEP/Units/SystemOfUnits.h>
++#include <fstream>
++#include <sstream>
+ 
+ /**
+  * @brief Creates a rotation matrix from zenith and azimuth angles.
+@@ -49,7 +51,9 @@ static G4RotationMatrix* MakeRotFromZenithAzimuth(G4double zenith,
+  */
+ void OMSimWavePIDDetector::constructWorld()
+ {
+-    m_worldSolid = new G4Orb("World", 30 * m);
++    G4double worldRadius = 30.0;
++    try { worldRadius = OMSimCommandArgsTable::getInstance().get<G4double>("world_radius"); } catch (...) {}
++    m_worldSolid = new G4Orb("World", worldRadius * m);
+     m_worldLogical = new G4LogicalVolume(m_worldSolid, m_data->getMaterial("argWorld"), "World_log", 0, 0, 0);
+     m_worldPhysical = new G4PVPlacement(0, G4ThreeVector(0., 0., 0.),
+                                         m_worldLogical, "World_phys", 0, false, 0);
+@@ -58,7 +62,7 @@ void OMSimWavePIDDetector::constructWorld()
+     worldVis->SetVisibility(true);
+     m_worldLogical->SetVisAttributes(worldVis);
+ 
+-    log_debug("World volume constructed: 30m radius sphere");
++    log_info("World volume constructed: {} m radius sphere", worldRadius);
+ }
+ 
+ /**
+@@ -75,9 +79,76 @@ void OMSimWavePIDDetector::constructDetector()
+     log_info("Constructing detector (type {}) at origin with zenith={} deg, azimuth={} deg",
+              args.get<G4int>("detector_type"), zenith, azimuth);
+ 
++    // --dom_layout: module positions [m]; default one module at the origin
++    std::vector<G4ThreeVector> layout;
++    std::string layoutSpec;
++    try { layoutSpec = args.get<std::string>("dom_layout"); } catch (...) {}
++    if (layoutSpec.empty()) {
++        layout.emplace_back(0, 0, 0);
++    } else {
++        std::vector<std::string> f;
++        std::stringstream ss(layoutSpec); std::string tok;
++        while (std::getline(ss, tok, ':')) f.push_back(tok);
++        if (f.size() == 3 && f[0] == "string") {                 // string:N:S  -> N modules along z, spacing S
++            const int n = std::stoi(f[1]); const double s = std::stod(f[2]);
++            for (int k = 0; k < n; ++k) layout.emplace_back(0, 0, (k - 0.5 * (n - 1)) * s);
++        } else if (f.size() == 5 && f[0] == "grid") {            // grid:NX:NY:NZ:S
++            const int nx = std::stoi(f[1]), ny = std::stoi(f[2]), nz = std::stoi(f[3]); const double s = std::stod(f[4]);
++            for (int i = 0; i < nx; ++i) for (int j = 0; j < ny; ++j) for (int k = 0; k < nz; ++k)
++                layout.emplace_back((i - 0.5 * (nx - 1)) * s, (j - 0.5 * (ny - 1)) * s, (k - 0.5 * (nz - 1)) * s);
++        } else if (f.size() == 2 && f[0] == "file") {               // file:<path> -> one module per line "x y z [qe]" [m], '#' comments
++            std::ifstream layoutFile(f[1]);
++            if (!layoutFile) {
++                log_critical("--dom_layout file: cannot open '{}'", f[1]);
++                throw std::runtime_error("bad --dom_layout file");
++            }
++            std::string line; double qeLo = 1e9, qeHi = -1e9;
++            while (std::getline(layoutFile, line)) {
++                if (line.empty() || line[0] == '#') continue;
++                std::istringstream ls(line);
++                double x, y, z, qe = 1.0;
++                if (!(ls >> x >> y >> z)) continue;
++                ls >> qe;
++                layout.emplace_back(x, y, z);
++                if (qe < qeLo) qeLo = qe;
++                if (qe > qeHi) qeHi = qe;
++            }
++            if (layout.empty()) {
++                log_critical("--dom_layout file: no modules read from '{}'", f[1]);
++                throw std::runtime_error("empty --dom_layout file");
++            }
++            log_info("--dom_layout file: {} modules from {} (qe column {:.2f}..{:.2f}, not applied per module: use --qe_scale)",
++                     layout.size(), f[1], qeLo, qeHi);
++        } else if ((f.size() == 2 || f.size() == 3) && f[0] == "fill") {   // fill:S[:R] -> cubic lattice of spacing S within R of the origin
++            const double s = std::stod(f[1]);
++            double worldR = 30.0;
++            try { worldR = args.get<G4double>("world_radius"); } catch (...) {}
++            const double r = f.size() == 3 ? std::stod(f[2]) : worldR - 1.5;
++            const int nmax = static_cast<int>(std::floor(r / s));
++            for (int i = -nmax; i <= nmax; ++i) for (int j = -nmax; j <= nmax; ++j) for (int k = -nmax; k <= nmax; ++k) {
++                G4ThreeVector pos(i * s, j * s, k * s);
++                if (pos.mag() <= r) layout.push_back(pos);
++            }
++            log_info("--dom_layout fill: {} modules on a {} m lattice within {} m of the origin", layout.size(), s, r);
++        } else {
++            log_critical("cannot parse --dom_layout '{}' (use string:N:S, grid:NX:NY:NZ:S, fill:S[:R] or file:<path>)", layoutSpec);
++            throw std::runtime_error("bad --dom_layout");
++        }
++    }
++    const int detectorType = args.get<G4int>("detector_type");
++    if (layout.size() > 1 && detectorType < 2) {
++        log_critical("--dom_layout with several modules needs an optical module (--detector_type 2..7)");
++        throw std::runtime_error("bad --detector_type for --dom_layout");
++    }
++    std::ofstream domsJson;
++    try { domsJson.open(args.get<std::string>("output_file") + "_doms.json"); } catch (...) {}
++    if (domsJson) domsJson << "[\n";
++
+     OMSimOpticalModule* opticalModule = nullptr;
+ 
+-    switch (args.get<G4int>("detector_type"))
++    for (std::size_t k = 0; k < layout.size(); ++k) {
++    opticalModule = nullptr;
++    switch (detectorType)
+     {
+     case 0:
+         log_critical("No custom detector implemented!");
+@@ -117,9 +188,16 @@ void OMSimWavePIDDetector::constructDetector()
+     if (opticalModule)
+     {
+         G4RotationMatrix* rot = MakeRotFromZenithAzimuth(zenith, azimuth, true);
+-        G4ThreeVector position(0.0 * m, 0.0 * m, 0.0 * m);
+-        opticalModule->placeIt(position, *rot, m_worldLogical, "");
++        const G4ThreeVector position = layout[k] * m;
++        opticalModule->placeIt(position, *rot, m_worldLogical, layout.size() > 1 ? "_" + std::to_string(k) : "");
+         opticalModule->configureSensitiveVolume(this);
+-        log_info("Optical module placed at origin (0, 0, 0)");
++        const std::string name = opticalModule->getName();               // "/DOM/<index>": index used as moduleID
++        const int index = std::atoi(name.substr(name.find_last_of('/') + 1).c_str());
++        log_info("Optical module {} (moduleID {}) placed at ({}, {}, {}) m", k, index, layout[k].x(), layout[k].y(), layout[k].z());
++        if (domsJson)
++            domsJson << (k ? ",\n" : "") << "  {\"moduleID\": " << index << ", \"x\": " << layout[k].x()
++                     << ", \"y\": " << layout[k].y() << ", \"z\": " << layout[k].z() << "}";
+     }
++    }   // layout loop
++    if (domsJson) domsJson << "\n]\n";
+ }
+diff --git a/simulations/wavepid/src/ROOTHitManager.cc b/simulations/wavepid/src/ROOTHitManager.cc
+index 18327eca..cb49a3d5 100644
+--- a/simulations/wavepid/src/ROOTHitManager.cc
++++ b/simulations/wavepid/src/ROOTHitManager.cc
+@@ -28,6 +28,7 @@ ROOTHitManager::ROOTHitManager(const std::string& filename)
+     m_tree->Branch("generationDetectionDistance", &m_photonInfo.generationDetectionDistance, "generationDetectionDistance/D");
+     m_tree->Branch("energy", &m_photonInfo.energy, "energy/D");
+     m_tree->Branch("PMTnr", &m_photonInfo.PMTnr, "PMTnr/I");
++    m_tree->Branch("moduleID", &m_photonInfo.moduleID, "moduleID/I");
+     m_tree->Branch("dir_x", &m_photonInfo.dir_x, "dir_x/D");
+     m_tree->Branch("dir_y", &m_photonInfo.dir_y, "dir_y/D");
+     m_tree->Branch("dir_z", &m_photonInfo.dir_z, "dir_z/D");
+@@ -47,6 +48,30 @@ ROOTHitManager::ROOTHitManager(const std::string& filename)
+     m_tree->Branch("parentProcess", &m_photonInfo.parentProcess);
+     m_tree->Branch("nPhotoelectrons", &m_photonInfo.nPhotoelectrons, "nPhotoelectrons/I");
+ 
++    m_eventTree = new TTree("Events", "One entry per simulated event");
++    m_eventTree->Branch("eventID", &m_evID, "eventID/I");
++    m_eventTree->Branch("primaryEnergy", &m_evEnergy, "primaryEnergy/D");
++    m_eventTree->Branch("primaryParticle", &m_evParticle);
++    m_eventTree->Branch("vx", &m_evVx, "vx/D");          // primary vertex [m]
++    m_eventTree->Branch("vy", &m_evVy, "vy/D");
++    m_eventTree->Branch("vz", &m_evVz, "vz/D");
++    m_eventTree->Branch("nu_dx", &m_evNx, "nu_dx/D");    // neutrino direction (event-frame +x after rotation)
++    m_eventTree->Branch("nu_dy", &m_evNy, "nu_dy/D");
++    m_eventTree->Branch("nu_dz", &m_evNz, "nu_dz/D");
++
++    m_trackTree = new TTree("PhotonTracks", "Step points of recorded tracks (--photon_tracks); mm, ns");
++    m_trackTree->Branch("eventID", &m_trEvent, "eventID/I");
++    m_trackTree->Branch("trackID", &m_trID, "trackID/I");
++    m_trackTree->Branch("parentID", &m_trParent, "parentID/I");
++    m_trackTree->Branch("particle", &m_trParticle);
++    m_trackTree->Branch("creator", &m_trCreator);
++    m_trackTree->Branch("energy", &m_trEnergy, "energy/D");
++    m_trackTree->Branch("wavelength", &m_trWavelength, "wavelength/D");
++    m_trackTree->Branch("detected", &m_trDetected, "detected/I");
++    m_trackTree->Branch("x", &m_trX);
++    m_trackTree->Branch("y", &m_trY);
++    m_trackTree->Branch("z", &m_trZ);
++    m_trackTree->Branch("t", &m_trT);
+     log_trace("ROOT tree created with all branches");
+ }
+ 
+@@ -56,16 +81,55 @@ ROOTHitManager::~ROOTHitManager()
+         log_trace("Writing and closing ROOT file");
+         m_file->cd();
+         m_tree->Write();
++        if (m_eventTree) m_eventTree->Write();
++        // only written when something was recorded, so production files keep two trees
++        if (m_trackTree && m_trackTree->GetEntries() > 0) m_trackTree->Write();
+         m_file->Close();
+     }
+     delete m_file;
+     m_file = nullptr;
+     m_tree = nullptr;  // Tree is owned by file, don't delete separately
++    m_eventTree = nullptr;
++    m_trackTree = nullptr;
+     log_trace("ROOT file closed");
+ }
+ 
++void ROOTHitManager::FillTrack(int eventID, int trackID, int parentID, const std::string& particle,
++                               const std::string& creator, double energyMeV, double wavelengthNm, int detected,
++                               const std::vector<float>& x, const std::vector<float>& y,
++                               const std::vector<float>& z, const std::vector<float>& t)
++{
++    std::lock_guard<std::mutex> lock(m_fillMutex);
++    m_trEvent = eventID; m_trID = trackID; m_trParent = parentID; m_trDetected = detected;
++    m_trParticle = particle.c_str(); m_trCreator = creator.c_str();
++    m_trEnergy = energyMeV; m_trWavelength = wavelengthNm;
++    m_trX = x; m_trY = y; m_trZ = z; m_trT = t;
++    m_trackTree->Fill();
++}
++
+ void ROOTHitManager::FillPhotonInfo(const PhotonInfoROOT& info)
+ {
++    // Worker threads all write into the same TTree; serialise the copy + Fill.
++    std::lock_guard<std::mutex> lock(m_fillMutex);
+     m_photonInfo = info;
+     m_tree->Fill();
+ }
++
++void ROOTHitManager::FillEvent(int eventID, double energyGeV, const std::string& particle,
++                               const double vertexM[3], const double nuDir[3])
++{
++    std::lock_guard<std::mutex> lock(m_fillMutex);
++    m_evVx = vertexM[0]; m_evVy = vertexM[1]; m_evVz = vertexM[2];
++    m_evNx = nuDir[0]; m_evNy = nuDir[1]; m_evNz = nuDir[2];
++    m_evID = eventID;
++    m_evEnergy = energyGeV;
++    m_evParticle = particle.c_str();
++    m_eventTree->Fill();
++    // Every 10 events write the tree headers and flush the baskets, so that a job killed at its time limit leaves a
++    // file ROOT can recover with the events completed so far (without this the whole part is lost).
++    if (++m_eventsFilled % 10 == 0) {
++        m_tree->AutoSave("SaveSelf,FlushBaskets,Overwrite");
++        m_eventTree->AutoSave("SaveSelf,FlushBaskets,Overwrite");
++        if (m_trackTree && m_trackTree->GetEntries() > 0) m_trackTree->AutoSave("SaveSelf,FlushBaskets,Overwrite");
++    }
++}

@@ -1,4 +1,4 @@
-# Simulation outputs and datasets (too large for git; regenerate with the scripts)
+# Simulation outputs, datasets and model files (too large for git; regenerate with the scripts)
 *.root
 *.npz
 *.parquet
@@ -8,31 +8,21 @@
 *.gif
 *.h5
 *.hdf5
-
-# Datasets, logs, checkpoints
 out/
-classifier/lightning_logs/
-PulseShapeInference/logs/
-PulseShapeInference/figs/
+logs/
+figs/
 PulseShapeInference/nue_*/
 PulseShapeInference/nu_*_big/
+PulseShapeInference/pythia_*/
 PulseShapeInference/classify_gamma_*_data/
-PulseShapeInference/pulse_regressor_meta.json
-PulseShapeInference/classify_gamma_*_meta.json
+PulseShapeInference/*_meta.json
 
-# Python / Jupyter
+# Python / LaTeX / macOS
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
-
-# LaTeX build files
 *.aux
 *.log
 *.out
 *.synctex.gz
-
-# macOS
 .DS_Store
-
-# Stray files from mistyped scp/ssh commands
-cluster/aburgosmondejar@*
